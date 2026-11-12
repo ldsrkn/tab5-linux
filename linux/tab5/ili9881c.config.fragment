@@ -1,0 +1,7 @@
+
+# Tab5 with the ILI9881C panel (EASYSTICK_TAB5_PANEL=ili9881c): panel driver
+# 0077 replaces the ST7123 one, and the polled GT911 touch driver 0078 feeds
+# an evdev touchscreen (/dev/input/eventN).
+CONFIG_DRM_PANEL_M5STACK_TAB5_ILI9881C=y
+CONFIG_INPUT_TOUCHSCREEN=y
+CONFIG_TOUCHSCREEN_M5STACK_TAB5_GT911=y

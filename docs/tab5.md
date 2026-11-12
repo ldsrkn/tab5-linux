@@ -128,8 +128,37 @@ ESP-Hosted-MCU image on the C6, see above).
 
 ## Open items
 
-- Only the ST7123 panel revision is supported; ILI9881C and ST7121 panels
-  need their own init tables.
+- ST7123 is the default panel; ILI9881C (with GT911 touch) is available as a
+  variant, see below.  ST7121 panels still need their own init table.
 - `/boot/config.txt` edits are not saved on the Tab5 (no USB drive).
 - The keyboard reports firmware version 0; its INT line (GPIO50) is unused.
 - The display costs about 4 MB of the kernel's memory (MemFree ~4 MB idle).
+
+## ILI9881C panel + GT911 touch variant (EASYSTICK_TAB5_PANEL=ili9881c)
+
+Some Tab5 units carry an ILI9881C panel (page-1 ID bytes `98 81 5c`) and a
+GT911 touch controller at I2C 0x14 instead of the ST7123.  Build both the
+boot shim and the image with
+
+```
+EASYSTICK_BOARD=tab5 EASYSTICK_TAB5_PANEL=ili9881c bash linux/build-c68.sh --vendor <out> --profile m3-lab
+```
+
+What changes relative to the default build:
+
+- kernel patch 0077 (`panel-m5stack-tab5-ili9881c`) replaces 0075; its init
+  sequence and timing are taken from M5GFX's `Panel_ILI9881C` (two lanes,
+  RGB565, 80 MHz pixel clock, 720x1280);
+- kernel patch 0078 (`m5stack-tab5-gt911`) is a polled GT911 driver on a
+  bit-banged I2C bus (SDA GPIO31, SCL GPIO32), reported as a multi-touch evdev
+  device;
+- `linux/dts/tab5-ili9881c.dtsi` is appended to the DTS, and
+  `linux/tab5/ili9881c.config.fragment` to the kernel config;
+- the boot shim pulses TP_RST (expander 0x43, P5) together with LCD_RST while
+  driving GPIO23 high, which makes the GT911 answer at 0x14, then releases
+  GPIO23 as an input.
+
+Not verified on hardware yet: the DSI lane rate (the glue uses a fixed
+1000 Mbit/s, M5GFX uses 1040), the ESP32-P4 revision v1.0 behaviour (upstream
+was tested on v1.3), and the coordinate mapping against the rotated fbcon
+(`fbcon=rotate:1`; touch reports the native 720x1280 portrait frame).

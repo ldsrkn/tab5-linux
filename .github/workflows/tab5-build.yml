@@ -20,6 +20,10 @@ on:
         description: 'esp-hosted-mcu tag for the OTA host (needs the Tab5 board option)'
         required: true
         default: 'v2.13.0'
+      tab5_panel:
+        description: 'Tab5 panel variant: ili9881c (panel 98 81 5c + GT911) or st7123'
+        required: true
+        default: 'ili9881c'
 permissions:
   contents: read
 jobs:
@@ -28,6 +32,7 @@ jobs:
     timeout-minutes: 360
     env:
       EASYSTICK_BOARD: tab5
+      EASYSTICK_TAB5_PANEL: ${{ github.event.inputs.tab5_panel || 'ili9881c' }}
       VERSION: ${{ github.event.inputs.version || 'v0.0.1-tab5' }}
       ESP_HOSTED_MCU_REF: ${{ github.event.inputs.esp_hosted_mcu_ref || 'v2.13.0' }}
     steps:

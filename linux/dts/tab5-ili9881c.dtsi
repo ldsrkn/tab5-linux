@@ -1,0 +1,41 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * M5Stack Tab5 with the ILI9881C panel and GT911 touch controller, appended
+ * after tab5-overrides.dtsi by build-m1.sh when EASYSTICK_BOARD=tab5 and
+ * EASYSTICK_TAB5_PANEL=ili9881c.  Tab5 units ship with either an ST7123
+ * panel (with its own touch controller) or this one; the panel is identified
+ * by the page-1 ID bytes 98 81 5c and the GT911 answers at I2C 0x14.
+ *
+ * Panel: kernel patch 0077 (init sequence and timing from M5GFX's
+ * Panel_ILI9881C, two lanes).  The boot shim, built with the same variable,
+ * releases LCD_RST and TP_RST together (INT high, selecting address 0x14).
+ *
+ * Touch: kernel patch 0078, polled (the P4 GPIO driver has no interrupt
+ * support for pins above 31, and GPIO23 is not wired the same way in every
+ * M5Stack reference).  The system I2C bus (SDA GPIO31, SCL GPIO32, 2.2 k
+ * pull-ups on the board) is bit-banged like the keyboard bus.
+ */
+
+/* Same DSI node; only the panel driver differs from the ST7123 build. */
+&dsi {
+	panel@0 {
+		compatible = "m5stack,tab5-ili9881c";
+	};
+};
+
+/ {
+	i2c_sys: i2c-sys {
+		compatible = "i2c-gpio";
+		/* GPIO31 is line 31 of bank 0, GPIO32 is line 0 of bank 1. */
+		sda-gpios = <&gpio0 31 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN | GPIO_PULL_UP)>;
+		scl-gpios = <&gpio1 0 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN | GPIO_PULL_UP)>;
+		i2c-gpio,delay-us = <5>;	/* about 100 kHz */
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		touchscreen@14 {
+			compatible = "m5stack,tab5-gt911";
+			reg = <0x14>;
+		};
+	};
+};

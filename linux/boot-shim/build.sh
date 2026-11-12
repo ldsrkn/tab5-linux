@@ -12,6 +12,8 @@ the M1 recovery image cannot be overwritten by an M2 experiment.
 
 Set EASYSTICK_BOARD=tab5 to build for the M5Stack Tab5 instead of the
 Stamp-P4 (default EASYSTICK_BOARD=stamp-p4).
+Set EASYSTICK_TAB5_PANEL=ili9881c with it for Tab5 units with the ILI9881C
+panel and GT911 touch controller (default st7123).
 
 Set EASYSTICK_TSENS_ORACLE=1 for an explicit C68-only ESP32-P4 LP-TSENS
 reference build. It emits one P4_TSENS_REF PASS line, then disables the
@@ -54,6 +56,10 @@ export IDF_TARGET=esp32p4
 EASYSTICK_BOARD=${EASYSTICK_BOARD:-stamp-p4}
 case "$EASYSTICK_BOARD" in stamp-p4|tab5) ;; *) echo "unsupported EASYSTICK_BOARD: $EASYSTICK_BOARD" >&2; exit 2 ;; esac
 export EASYSTICK_BOARD
+# Tab5 panel variant: st7123 (default) or ili9881c (also resets the GT911).
+EASYSTICK_TAB5_PANEL=${EASYSTICK_TAB5_PANEL:-st7123}
+case "$EASYSTICK_TAB5_PANEL" in st7123|ili9881c) ;; *) echo "unsupported EASYSTICK_TAB5_PANEL: $EASYSTICK_TAB5_PANEL" >&2; exit 2 ;; esac
+export EASYSTICK_TAB5_PANEL
 ES_GIT_REV=${ES_GIT_REV:-$(git -C "${script_dir}" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)}
 export ES_GIT_REV
 export EASYSTICK_BOOT_PROFILE="$profile"

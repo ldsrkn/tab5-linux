@@ -36,6 +36,12 @@ does not change any image.
 Set EASYSTICK_BOARD=tab5 to build for the M5Stack Tab5: the DTS gets
 linux/dts/tab5-overrides.dtsi appended (the DTB keeps its name).  Build the
 boot shim with the same variable (build-c68.sh passes it through).
+Set EASYSTICK_TAB5_PANEL=ili9881c with EASYSTICK_BOARD=tab5 for Tab5 units
+whose panel is an ILI9881C with a GT911 touch controller (page-1 ID 98 81 5c,
+GT911 at I2C 0x14) instead of the ST7123: it selects kernel patches 0077
+(panel) and 0078 (polled GT911) in place of 0075 and appends
+linux/dts/tab5-ili9881c.dtsi.  The default (st7123) is unchanged.  Build the
+boot shim with the same variable so that it also resets the touch controller.
 --profile m3-lab reserves 64 KB of PSRAM for ramoops (kernel oops/panic and
 console tail, #26); set EASYSTICK_PSTORE=0 to leave it out.  On hardware the console
 record keeps the panic across both the panic=5 restart and a watchdog reset
@@ -863,7 +869,16 @@ if [[ "${EASYSTICK_BOARD:-stamp-p4}" == tab5 ]]; then
 	patches+=(0003-drm-mipi-dsi-esp32p4.patch)
 	patches+=(0073-easystick-esp32p4-dsi-commit-tail.patch)
 	patches+=(0074-easystick-esp32p4-dsi-mode-clock.patch)
-	patches+=(0075-drm-panel-sitronix-st7123.patch)
+	case "${EASYSTICK_TAB5_PANEL:-st7123}" in
+		st7123)
+			patches+=(0075-drm-panel-sitronix-st7123.patch)
+			;;
+		ili9881c)
+			patches+=(0077-drm-panel-m5stack-tab5-ili9881c.patch)
+			patches+=(0078-input-m5stack-tab5-gt911.patch)
+			;;
+		*) echo "unsupported EASYSTICK_TAB5_PANEL: ${EASYSTICK_TAB5_PANEL}" >&2; exit 2 ;;
+	esac
 	patches+=(0076-input-m5stack-tab5-keyboard.patch)
 fi
 for patch_name in "${patches[@]}"; do
@@ -902,6 +917,8 @@ for patch_name in "${patches[@]}"; do
 	      "$patch_name" == 0074-easystick-esp32p4-dsi-mode-clock.patch ||
 	      "$patch_name" == 0075-drm-panel-sitronix-st7123.patch ||
 	      "$patch_name" == 0076-input-m5stack-tab5-keyboard.patch ||
+	      "$patch_name" == 0077-drm-panel-m5stack-tab5-ili9881c.patch ||
+	      "$patch_name" == 0078-input-m5stack-tab5-gt911.patch ||
 	      "$patch_name" == 0056-easystick-wdt-stacktrace.patch ||
 	      "$patch_name" == 0055-easystick-sdio-clock-attest.patch ||
 	      "$patch_name" == 0060-easystick-dw-mmc-tx-software-dto.patch ||
@@ -971,10 +988,17 @@ case "${EASYSTICK_BOARD:-stamp-p4}" in
 	tab5)
 		cat -- "${firmware_root}/linux/dts/tab5-overrides.dtsi" \
 			>>"${dts_stage}/espressif/easystick-stamp-p4.dts"
+		if [[ "${EASYSTICK_TAB5_PANEL:-st7123}" == ili9881c ]]; then
+			cat -- "${firmware_root}/linux/dts/tab5-ili9881c.dtsi" \
+				>>"${dts_stage}/espressif/easystick-stamp-p4.dts"
+		fi
 		;;
 	*) echo "unsupported EASYSTICK_BOARD: ${EASYSTICK_BOARD}" >&2; exit 2 ;;
 esac
 printf '%s\n' "board: ${EASYSTICK_BOARD:-stamp-p4}" >>"${patch_stage}/SOURCE.txt"
+if [[ "${EASYSTICK_BOARD:-stamp-p4}" == tab5 ]]; then
+	printf '%s\n' "tab5 panel: ${EASYSTICK_TAB5_PANEL:-st7123}" >>"${patch_stage}/SOURCE.txt"
+fi
 if [[ "$wdt_test_timeout_s" != "0" ]]; then
 	python3 - "${dts_stage}/espressif/easystick-stamp-p4.dts" \
 		"$wdt_test_timeout_s" "$wdt_test_no_feed" <<'PY'
@@ -1039,7 +1063,15 @@ if $lab_profile; then
 	cat "${firmware_root}/linux/m3-lab/kernel.config.fragment" >>"${kernel_config_fragment}"
 fi
 if [[ "${EASYSTICK_BOARD:-stamp-p4}" == tab5 ]]; then
-	cat "${firmware_root}/linux/tab5/kernel.config.fragment" >>"${kernel_config_fragment}"
+	if [[ "${EASYSTICK_TAB5_PANEL:-st7123}" == ili9881c ]]; then
+		# The ST7123 driver (0075) is not applied in this variant.
+		grep -v '^CONFIG_DRM_PANEL_SITRONIX_ST7123=' \
+			"${firmware_root}/linux/tab5/kernel.config.fragment" \
+			>>"${kernel_config_fragment}"
+		cat "${firmware_root}/linux/tab5/ili9881c.config.fragment" >>"${kernel_config_fragment}"
+	else
+		cat "${firmware_root}/linux/tab5/kernel.config.fragment" >>"${kernel_config_fragment}"
+	fi
 fi
 if [[ -n "$pstore_identity" ]]; then
 	cat >>"${kernel_config_fragment}" <<'EOF'

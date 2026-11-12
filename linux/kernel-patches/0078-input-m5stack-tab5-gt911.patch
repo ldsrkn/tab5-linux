@@ -1,0 +1,236 @@
+From: EasyStick Tab5 port
+Subject: [PATCH] Input: add polled Goodix GT911 for the M5Stack Tab5
+
+Early Tab5 units (panel ILI9881C) carry a Goodix GT911 at I2C 0x14 on the
+system bus (GPIO31/32).  The controller's interrupt line is not usable
+here, so read it on a timer, with the register protocol M5Stack's own
+M5GFX uses (lgfx/v1/touch/Touch_GT911.inl).
+
+diff --git a/drivers/input/touchscreen/Kconfig b/drivers/input/touchscreen/Kconfig
+--- a/drivers/input/touchscreen/Kconfig
++++ b/drivers/input/touchscreen/Kconfig
+@@ -398,6 +398,19 @@
+ 	  To compile this driver as a module, choose M here: the
+ 	  module will be called goodix.
+ 
++config TOUCHSCREEN_M5STACK_TAB5_GT911
++	tristate "M5Stack Tab5 polled GT911 touchscreen"
++	depends on I2C
++	help
++	  Say Y here for the Goodix GT911 touch controller of early M5Stack
++	  Tab5 units.  Its interrupt line is not usable on that board, so the
++	  controller is polled over I2C.
++
++	  If unsure, say N.
++
++	  To compile this driver as a module, choose M here: the
++	  module will be called m5stack-tab5-gt911.
++
+ config TOUCHSCREEN_GOODIX_BERLIN_CORE
+ 	tristate
+ 
+diff --git a/drivers/input/touchscreen/Makefile b/drivers/input/touchscreen/Makefile
+--- a/drivers/input/touchscreen/Makefile
++++ b/drivers/input/touchscreen/Makefile
+@@ -45,6 +45,7 @@
+ obj-$(CONFIG_TOUCHSCREEN_EXC3000)	+= exc3000.o
+ obj-$(CONFIG_TOUCHSCREEN_FUJITSU)	+= fujitsu_ts.o
+ obj-$(CONFIG_TOUCHSCREEN_GOODIX)	+= goodix_ts.o
++obj-$(CONFIG_TOUCHSCREEN_M5STACK_TAB5_GT911)	+= m5stack-tab5-gt911.o
+ obj-$(CONFIG_TOUCHSCREEN_GOODIX_BERLIN_CORE)	+= goodix_berlin_core.o
+ obj-$(CONFIG_TOUCHSCREEN_GOODIX_BERLIN_I2C)	+= goodix_berlin_i2c.o
+ obj-$(CONFIG_TOUCHSCREEN_GOODIX_BERLIN_SPI)	+= goodix_berlin_spi.o
+diff --git a/drivers/input/touchscreen/m5stack-tab5-gt911.c b/drivers/input/touchscreen/m5stack-tab5-gt911.c
+new file mode 100644
+--- /dev/null
++++ b/drivers/input/touchscreen/m5stack-tab5-gt911.c
+@@ -0,0 +1,189 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Polled Goodix GT911 touch controller, as on the early M5Stack Tab5.
++ *
++ * The Tab5 has no usable interrupt line for the controller (the P4 GPIO
++ * driver has no interrupt consumers here), so this driver reads the
++ * controller over I2C on a timer, the way M5Stack's own M5GFX does
++ * (lgfx/v1/touch/Touch_GT911.inl):
++ *
++ *   0x814e  status: bit 7 = data ready, bits 3..0 = number of points
++ *   0x814f  point data, 8 bytes each: track id, x (LE16), y (LE16), size (LE16)
++ *   0x814e  written with 0 to release the buffer after every read
++ *
++ * Register addresses are 16-bit big-endian on the wire, reads are a register
++ * address write followed by a repeated start.  Reset and the address
++ * selection (0x14) are done by the boot shim before Linux starts.
++ */
++
++#include <linux/bitfield.h>
++#include <linux/bits.h>
++#include <linux/i2c.h>
++#include <linux/input.h>
++#include <linux/input/mt.h>
++#include <linux/input/touchscreen.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/ratelimit.h>
++#include <linux/unaligned.h>
++
++#define GT911_REG_PRODUCT_ID	0x8140	/* 4 ASCII bytes, "911\0" */
++#define GT911_REG_STATUS	0x814e
++#define GT911_REG_POINTS	0x814f
++
++#define GT911_STATUS_READY	BIT(7)
++#define GT911_STATUS_COUNT	GENMASK(3, 0)
++#define GT911_MAX_POINTS	5
++#define GT911_POINT_SIZE	8
++
++#define GT911_POLL_MS		16
++
++struct gt911 {
++	struct i2c_client *client;
++	struct input_dev *input;
++	struct touchscreen_properties prop;
++};
++
++static int gt911_read(struct i2c_client *client, u16 reg, void *buf, size_t len)
++{
++	u8 addr[2] = { reg >> 8, reg & 0xff };
++	struct i2c_msg msgs[2] = {
++		{ .addr = client->addr, .flags = 0, .len = sizeof(addr), .buf = addr },
++		{ .addr = client->addr, .flags = I2C_M_RD, .len = len, .buf = buf },
++	};
++	int ret;
++
++	ret = i2c_transfer(client->adapter, msgs, ARRAY_SIZE(msgs));
++	if (ret < 0)
++		return ret;
++	return ret == ARRAY_SIZE(msgs) ? 0 : -EIO;
++}
++
++static int gt911_write8(struct i2c_client *client, u16 reg, u8 val)
++{
++	u8 buf[3] = { reg >> 8, reg & 0xff, val };
++	int ret;
++
++	ret = i2c_master_send(client, buf, sizeof(buf));
++	if (ret < 0)
++		return ret;
++	return ret == sizeof(buf) ? 0 : -EIO;
++}
++
++static void gt911_poll(struct input_dev *input)
++{
++	struct gt911 *ts = input_get_drvdata(input);
++	struct i2c_client *client = ts->client;
++	u8 pts[GT911_MAX_POINTS * GT911_POINT_SIZE];
++	u8 status;
++	int i, n, ret;
++
++	ret = gt911_read(client, GT911_REG_STATUS, &status, 1);
++	if (ret) {
++		dev_err_ratelimited(&client->dev, "status read failed: %d\n", ret);
++		return;
++	}
++	if (!(status & GT911_STATUS_READY))
++		return;
++
++	n = min_t(int, FIELD_GET(GT911_STATUS_COUNT, status), GT911_MAX_POINTS);
++	if (n) {
++		ret = gt911_read(client, GT911_REG_POINTS, pts, n * GT911_POINT_SIZE);
++		if (ret) {
++			dev_err_ratelimited(&client->dev,
++					    "point read failed: %d\n", ret);
++			n = -1;
++		}
++	}
++
++	/* The controller keeps reporting the same frame until it is released. */
++	ret = gt911_write8(client, GT911_REG_STATUS, 0);
++	if (ret)
++		dev_err_ratelimited(&client->dev, "status clear failed: %d\n", ret);
++	if (n < 0)
++		return;
++
++	for (i = 0; i < n; i++) {
++		const u8 *p = &pts[i * GT911_POINT_SIZE];
++
++		input_mt_slot(input, i);
++		input_mt_report_slot_state(input, MT_TOOL_FINGER, true);
++		touchscreen_report_pos(input, &ts->prop,
++				       get_unaligned_le16(p + 1),
++				       get_unaligned_le16(p + 3), true);
++		input_report_abs(input, ABS_MT_TOUCH_MAJOR,
++				 get_unaligned_le16(p + 5));
++	}
++	input_mt_sync_frame(input);
++	input_sync(input);
++}
++
++static int gt911_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct gt911 *ts;
++	struct input_dev *input;
++	u8 id[4];
++	int ret;
++
++	if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C))
++		return dev_err_probe(dev, -ENODEV, "plain I2C is required\n");
++
++	ts = devm_kzalloc(dev, sizeof(*ts), GFP_KERNEL);
++	if (!ts)
++		return -ENOMEM;
++	ts->client = client;
++
++	ret = gt911_read(client, GT911_REG_PRODUCT_ID, id, sizeof(id));
++	if (ret)
++		return dev_err_probe(dev, ret, "no answer from the controller\n");
++	dev_info(dev, "product id %02x %02x %02x %02x (\"%.4s\")\n",
++		 id[0], id[1], id[2], id[3], id);
++
++	input = devm_input_allocate_device(dev);
++	if (!input)
++		return -ENOMEM;
++	ts->input = input;
++	input->name = "M5Stack Tab5 GT911";
++	input->id.bustype = BUS_I2C;
++	input_set_drvdata(input, ts);
++
++	/* Tab5 panel is 720x1280 and the controller reports it unrotated. */
++	input_set_abs_params(input, ABS_MT_POSITION_X, 0, 719, 0, 0);
++	input_set_abs_params(input, ABS_MT_POSITION_Y, 0, 1279, 0, 0);
++	input_set_abs_params(input, ABS_MT_TOUCH_MAJOR, 0, 255, 0, 0);
++	touchscreen_parse_properties(input, true, &ts->prop);
++
++	ret = input_mt_init_slots(input, GT911_MAX_POINTS,
++				  INPUT_MT_DIRECT | INPUT_MT_DROP_UNUSED);
++	if (ret)
++		return dev_err_probe(dev, ret, "cannot init MT slots\n");
++
++	ret = input_setup_polling(input, gt911_poll);
++	if (ret)
++		return dev_err_probe(dev, ret, "cannot set up polling\n");
++	input_set_poll_interval(input, GT911_POLL_MS);
++
++	ret = input_register_device(input);
++	if (ret)
++		return dev_err_probe(dev, ret, "cannot register input device\n");
++	return 0;
++}
++
++static const struct of_device_id gt911_of_match[] = {
++	{ .compatible = "m5stack,tab5-gt911" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, gt911_of_match);
++
++static struct i2c_driver gt911_driver = {
++	.driver = {
++		.name = "m5stack-tab5-gt911",
++		.of_match_table = gt911_of_match,
++	},
++	.probe = gt911_probe,
++};
++module_i2c_driver(gt911_driver);
++
++MODULE_DESCRIPTION("Polled Goodix GT911 touch controller (M5Stack Tab5)");
++MODULE_LICENSE("GPL");

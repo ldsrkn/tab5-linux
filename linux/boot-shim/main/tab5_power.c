@@ -46,6 +46,22 @@ static const char *TAG = "tab5-power";
 #define PI4IO_PWR_WLAN_PWR_EN (1u << 0)
 #define PI4IO_SYS_RF_PTH_EXT (1u << 0)
 #define PI4IO_SYS_LCD_RST (1u << 4)
+#define PI4IO_SYS_TP_RST (1u << 5)
+
+/*
+ * ILI9881C panel variant (EASYSTICK_TAB5_PANEL=ili9881c): the GT911 touch
+ * controller shares the reset window with the panel.  It latches its I2C
+ * address from the level of its INT pin at the reset release edge: high
+ * selects 0x14, which is what the Linux device tree expects.  M5GFX drives
+ * GPIO23 high for this; the line is released again afterwards.
+ */
+#ifdef EASYSTICK_TAB5_TOUCH_RESET
+#define TAB5_TP_INT GPIO_NUM_23
+#define LCD_RESET_MASK (PI4IO_SYS_LCD_RST | PI4IO_SYS_TP_RST)
+#define TP_ADDR_HOLD_US 10000u
+#else
+#define LCD_RESET_MASK PI4IO_SYS_LCD_RST
+#endif
 
 #define TAB5_LCD_BACKLIGHT GPIO_NUM_22
 #define LCD_RESET_ASSERT_US 10000u
@@ -238,16 +254,32 @@ bool tab5_lcd_power_on(void)
 {
 	bool ok;
 
+#ifdef EASYSTICK_TAB5_TOUCH_RESET
+	/* INT high while TP_RST rises selects the GT911 address 0x14. */
+	gpio_reset_pin(TAB5_TP_INT);
+	gpio_set_direction(TAB5_TP_INT, GPIO_MODE_OUTPUT);
+	gpio_set_level(TAB5_TP_INT, 1);
+#endif
 	i2c_bus_claim();
-	ok = pi4io_drive(PI4IO_ADDR_SYS, PI4IO_SYS_LCD_RST, false);
+	ok = pi4io_drive(PI4IO_ADDR_SYS, LCD_RESET_MASK, false);
 	esp_rom_delay_us(LCD_RESET_ASSERT_US);
-	ok = ok && pi4io_drive(PI4IO_ADDR_SYS, PI4IO_SYS_LCD_RST, true);
+	ok = ok && pi4io_drive(PI4IO_ADDR_SYS, LCD_RESET_MASK, true);
 	i2c_bus_release();
 	if (!ok) {
 		ESP_LOGE(TAG, "LCD_RST write failed; the panel stays in reset");
+#ifdef EASYSTICK_TAB5_TOUCH_RESET
+		gpio_set_direction(TAB5_TP_INT, GPIO_MODE_INPUT);
+#endif
 		return false;
 	}
+#ifdef EASYSTICK_TAB5_TOUCH_RESET
+	esp_rom_delay_us(TP_ADDR_HOLD_US);
+	/* Address latched; hand INT back as a plain input for Linux. */
+	gpio_set_direction(TAB5_TP_INT, GPIO_MODE_INPUT);
+	esp_rom_delay_us(LCD_RESET_READY_US - TP_ADDR_HOLD_US);
+#else
 	esp_rom_delay_us(LCD_RESET_READY_US);
+#endif
 
 	/* Linux keeps no GPIO22 state; leave the boost converter on. */
 	gpio_reset_pin(TAB5_LCD_BACKLIGHT);

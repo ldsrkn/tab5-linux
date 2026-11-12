@@ -15,6 +15,11 @@ endif()
 if("$ENV{EASYSTICK_BOARD}" STREQUAL "tab5")
     target_sources(${COMPONENT_LIB} PRIVATE "tab5_power.c")
     target_compile_definitions(${COMPONENT_LIB} PRIVATE EASYSTICK_BOARD_TAB5=1)
+    # ILI9881C panel + GT911 touch: pulse TP_RST with LCD_RST and latch the
+    # touch address 0x14 (the ST7123 variant has its own touch controller).
+    if("$ENV{EASYSTICK_TAB5_PANEL}" STREQUAL "ili9881c")
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE EASYSTICK_TAB5_TOUCH_RESET=1)
+    endif()
 elseif(NOT "$ENV{EASYSTICK_BOARD}" STREQUAL "" AND
        NOT "$ENV{EASYSTICK_BOARD}" STREQUAL "stamp-p4")
     message(FATAL_ERROR "unsupported EASYSTICK_BOARD: $ENV{EASYSTICK_BOARD}")
