@@ -234,6 +234,15 @@ sync_time() {
 		echo "M3-lab: clock set from NTP: $(date)" ) &
 }
 
+# Tell the console that Wi-Fi is not up.  The flag makes the root shell that
+# init opens on tty1 / the USB-C console ask for an SSID and password
+# (/usr/lib/easystick/wifi-setup.sh, sourced from /etc/profile).
+wifi_setup_needed() {
+	echo "$1" > /run/.es-wifi-setup
+	echo "M3-lab: Wi-Fi not connected ($1${2:+, saved SSID: $2})."
+	echo "M3-lab: press Enter on this console to type the SSID and password of another network."
+}
+
 # udhcpd runs in the foreground under easystick-respawn (#29): it comes back
 # if it dies, and -f keeps NOMMU udhcpd from re-execing itself as a daemon.
 UDHCPD_SUP=/run/.es-udhcpd-sup
@@ -243,6 +252,10 @@ stop_udhcpd() {
 }
 
 start() {
+	# A console Wi-Fi prompt (wifi-setup.sh, sourced by /etc/profile) only appears
+	# while the last attempt to join the saved network failed.
+	rm -f /run/.es-wifi-setup
+
 	# The cmdline boots with loglevel=4, so kernel markers at KERN_INFO and
 	# below (ES_WDT, OBS) stay in dmesg only.  Console traffic at loglevel 8
 	# starves SDIO/ARP on this NOMMU target even after the quiet ESP-Hosted
@@ -379,6 +392,9 @@ start() {
 				else
 					echo "M3-lab: udhcpd not found"
 				fi
+				if ! iw dev wlan0 info 2>/dev/null | grep -q "type AP"; then
+					wifi_setup_needed AP_UNSUPPORTED ""
+				fi
 				AP_SSID=$(conf_ssid "$CONF")
 				echo "M3-lab: SoftAP started (SSID: ${AP_SSID:-m5}, IP: 192.168.4.1)"
 				[ -x /etc/init.d/S85easystick-ssh ] && /etc/init.d/S85easystick-ssh restart &
@@ -423,6 +439,7 @@ start() {
 				sta_state=AUTH_FAILED
 			fi
 			echo "M3-lab: wlan0 did not associate ($sta_state)"
+			wifi_setup_needed "$sta_state" "$sta_ssid"
 			[ -x /usr/sbin/easystick-update-status ] && /usr/sbin/easystick-update-status "$sta_state" "none" "none" "none" "${sta_ssid:-none}" "sta" &
 			# wpa_supplicant keeps scanning, so the network may appear later
 			# (a phone hotspot, a router that boots after the board).  Keep a

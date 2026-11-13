@@ -17,6 +17,21 @@ fi
 
 export EDITOR='/bin/vi'
 
+# S40network could not join the saved Wi-Fi network: a root console shell asks
+# for another SSID and password.  Kept outside the PS1 block above so it does
+# not depend on how the shell initialises PS1.
+if [ -f /run/.es-wifi-setup ] && [ -t 0 ] && [ -r /usr/lib/easystick/wifi-setup.sh ]; then
+	_uid=
+	while read -r _k _uid _r; do
+		[ "$_k" = Uid: ] && break
+	done < /proc/self/status
+	if [ "$_uid" = 0 ]; then
+		. /usr/lib/easystick/wifi-setup.sh
+		es_wifi_setup
+	fi
+	unset _k _uid _r
+fi
+
 # Source configuration files from /etc/profile.d
 for i in /etc/profile.d/*.sh ; do
 	if [ -r "$i" ]; then
