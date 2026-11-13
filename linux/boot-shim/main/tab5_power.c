@@ -24,8 +24,14 @@
 #include <stdint.h>
 
 #include "driver/gpio.h"
+#include "esp_ldo_regulator.h"
 #include "esp_log.h"
+#include "esp_rom_gpio.h"
 #include "esp_rom_sys.h"
+#include "hal/gpio_ll.h"
+#include "soc/gpio_sig_map.h"
+#include "soc/gpio_struct.h"
+#include "soc/hp_sys_clkrst_struct.h"
 
 #include "tab5_power.h"
 
@@ -287,5 +293,123 @@ bool tab5_lcd_power_on(void)
 	gpio_set_level(TAB5_LCD_BACKLIGHT, 1);
 	ESP_LOGI(TAG, "LCD reset released (expander 0x%02x P4), backlight on",
 		 PI4IO_ADDR_SYS);
+	return true;
+}
+
+/*
+ * microSD slot rail.  The slot pads (GPIO39..44) sit in the VDDPST_5 power
+ * domain, which the P4 feeds from on-chip LDO channel 4 (the SD_VREF
+ * output); nothing enables it at reset, so without this the card has no
+ * I/O supply and every pad is dead.  3300 mV is LDO_LL_RAIL_VOLTAGE_MV:
+ * the regulator is bypassed and the pads see the 3.3 V input rail, which is
+ * what a standard SD card needs.  The channel is acquired once and never
+ * released: Linux has no regulator driver for it and treats the rail as
+ * always on.  Pin function and pull-ups are left to Linux (the P4 GPIO
+ * driver switches the IO_MUX function on request); the slot is driven in
+ * SPI mode by spi-gpio + mmc_spi.
+ */
+#define TAB5_SD_LDO_CHAN 4
+#define TAB5_SD_LDO_MV 3300
+
+bool tab5_sd_power_on(void)
+{
+	static esp_ldo_channel_handle_t sd_ldo;
+	const esp_ldo_channel_config_t cfg = {
+		.chan_id = TAB5_SD_LDO_CHAN,
+		.voltage_mv = TAB5_SD_LDO_MV,
+	};
+	esp_err_t err = esp_ldo_acquire_channel(&cfg, &sd_ldo);
+
+	if (err != ESP_OK) {
+		ESP_LOGE(TAG, "SD rail (LDO%d, %d mV) failed: %s; the card stays unpowered",
+			 TAB5_SD_LDO_CHAN, TAB5_SD_LDO_MV, esp_err_to_name(err));
+		return false;
+	}
+	ESP_LOGI(TAG, "SD rail on (LDO%d, %d mV)", TAB5_SD_LDO_CHAN, TAB5_SD_LDO_MV);
+	return true;
+}
+
+/*
+ * UART1 on the RS485 transceiver (SIT3088): TX GPIO20 (driver input), RX
+ * GPIO21 (receiver output), DIR GPIO34 (DE and /RE tied together) -- M5Stack's
+ * Tab5 pin table.  Linux's esp32_uart driver programs the UART core itself;
+ * this only does what it cannot reach: turn the peripheral's clock on, pick
+ * its source clock and divider in HP_SYS_CLKRST, and route the three signals
+ * through the GPIO matrix.  The sequence is IDF's (hal/esp32p4/uart_ll.h:
+ * uart_ll_enable_bus_clock(), uart_ll_reset_register(), uart_ll_sclk_enable(),
+ * uart_ll_set_sclk(), uart_ll_set_baudrate()).
+ *
+ * The source is XTAL (40 MHz) divided by 4: the UART divider is 12 bits, so
+ * 40 MHz alone could not reach 9600 baud (the divisor would be 4166); 10 MHz
+ * covers about 2.4 kbaud up to a few Mbaud.  The device tree declares the
+ * same 10 MHz.  DIR is the UART's RTS output: Linux puts the port in
+ * RS485 half-duplex mode and the hardware raises it while transmitting.
+ */
+#define TAB5_RS485_TX GPIO_NUM_20
+#define TAB5_RS485_RX GPIO_NUM_21
+#define TAB5_RS485_DIR GPIO_NUM_34
+#define TAB5_UART1_SCLK_DIV 4u /* XTAL / 4 = 10 MHz */
+
+bool tab5_rs485_uart_init(void)
+{
+	/* APB + system clock gates, then a reset pulse, as uart_ll does. */
+	HP_SYS_CLKRST.soc_clk_ctrl2.reg_uart1_apb_clk_en = 1;
+	HP_SYS_CLKRST.soc_clk_ctrl1.reg_uart1_sys_clk_en = 1;
+	HP_SYS_CLKRST.hp_rst_en1.reg_rst_en_uart1_apb = 1;
+	HP_SYS_CLKRST.hp_rst_en1.reg_rst_en_uart1_apb = 0;
+
+	/* Source clock: XTAL (select value 0), divider div_num + 1. */
+	HP_SYS_CLKRST.peri_clk_ctrl111.reg_uart1_clk_src_sel = 0;
+	HP_SYS_CLKRST.peri_clk_ctrl112.reg_uart1_sclk_div_num = TAB5_UART1_SCLK_DIV - 1u;
+	HP_SYS_CLKRST.peri_clk_ctrl112.reg_uart1_sclk_div_numerator = 0;
+	HP_SYS_CLKRST.peri_clk_ctrl112.reg_uart1_sclk_div_denominator = 0;
+	HP_SYS_CLKRST.peri_clk_ctrl111.reg_uart1_clk_en = 1;
+
+	/* DIR low = receive until the UART says otherwise. */
+	gpio_reset_pin(TAB5_RS485_DIR);
+	gpio_set_level(TAB5_RS485_DIR, 0);
+	esp_rom_gpio_connect_out_signal(TAB5_RS485_DIR, UART1_RTS_PAD_OUT_IDX, false, false);
+	gpio_ll_set_output_enable_ctrl(&GPIO, TAB5_RS485_DIR, true, false);
+
+	/* TX idles high; the peripheral owns the output enable (OEN_SEL = 0). */
+	gpio_reset_pin(TAB5_RS485_TX);
+	gpio_set_level(TAB5_RS485_TX, 1);
+	esp_rom_gpio_connect_out_signal(TAB5_RS485_TX, UART1_TXD_PAD_OUT_IDX, false, false);
+	gpio_ll_set_output_enable_ctrl(&GPIO, TAB5_RS485_TX, true, false);
+
+	/* RX: pull-up keeps an idle (unconnected) receiver output at mark. */
+	gpio_reset_pin(TAB5_RS485_RX);
+	gpio_set_direction(TAB5_RS485_RX, GPIO_MODE_INPUT);
+	gpio_set_pull_mode(TAB5_RS485_RX, GPIO_PULLUP_ONLY);
+	esp_rom_gpio_connect_in_signal(TAB5_RS485_RX, UART1_RXD_PAD_IN_IDX, false);
+
+	ESP_LOGI(TAG, "UART1 -> RS485 (TX GPIO%d, RX GPIO%d, DIR GPIO%d, sclk XTAL/%u)",
+		 (int)TAB5_RS485_TX, (int)TAB5_RS485_RX, (int)TAB5_RS485_DIR,
+		 TAB5_UART1_SCLK_DIV);
+	return true;
+}
+
+/*
+ * UART2 for the Grove port (PORT.A, G53 / G54).  Only the clocks are set
+ * up here, the same way as for UART1 (XTAL / 4 = 10 MHz, which also reaches
+ * the 250 kbaud of DMX512 exactly: divisor 40).  The pads are NOT routed:
+ * Grove is shared between this UART and a bit-banged I2C bus, and Linux
+ * picks one with grove-mode (it writes the GPIO matrix itself).
+ */
+bool tab5_grove_uart_init(void)
+{
+	HP_SYS_CLKRST.soc_clk_ctrl2.reg_uart2_apb_clk_en = 1;
+	HP_SYS_CLKRST.soc_clk_ctrl1.reg_uart2_sys_clk_en = 1;
+	HP_SYS_CLKRST.hp_rst_en1.reg_rst_en_uart2_apb = 1;
+	HP_SYS_CLKRST.hp_rst_en1.reg_rst_en_uart2_apb = 0;
+
+	HP_SYS_CLKRST.peri_clk_ctrl112.reg_uart2_clk_src_sel = 0;
+	HP_SYS_CLKRST.peri_clk_ctrl113.reg_uart2_sclk_div_num = TAB5_UART1_SCLK_DIV - 1u;
+	HP_SYS_CLKRST.peri_clk_ctrl113.reg_uart2_sclk_div_numerator = 0;
+	HP_SYS_CLKRST.peri_clk_ctrl113.reg_uart2_sclk_div_denominator = 0;
+	HP_SYS_CLKRST.peri_clk_ctrl112.reg_uart2_clk_en = 1;
+
+	ESP_LOGI(TAG, "UART2 clocked for Grove (sclk XTAL/%u), pads left to Linux",
+		 TAB5_UART1_SCLK_DIV);
 	return true;
 }

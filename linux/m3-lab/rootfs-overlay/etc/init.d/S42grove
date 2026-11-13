@@ -1,0 +1,8 @@
+#!/bin/sh
+# Set the Grove port (G53/G54) to the remembered mode, UART by default.
+case "${1:-start}" in
+	start) /usr/sbin/grove-mode boot ;;
+	stop|restart) ;;
+	*) echo "Usage: $0 {start|stop|restart}" >&2; exit 1 ;;
+esac
+exit 0

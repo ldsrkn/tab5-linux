@@ -161,3 +161,111 @@
 		};
 	};
 };
+
+/*
+ * Tab5 microSD slot, driven in SPI mode.  The slot is SDMMC Slot 0 on the
+ * dedicated pads GPIO39..44, but the P4 has one SDMMC controller whose
+ * Slot 1 is taken by the C6 and the local dw_mmc driver is single-slot, so
+ * the card is bit-banged instead (M5's documented SPI-mode mapping):
+ *
+ *   GPIO43 CLK -> SCK    GPIO44 CMD -> MOSI    GPIO39 DAT0 -> MISO
+ *   GPIO42 DAT3 -> CS    (GPIO40/41, DAT1/DAT2, stay idle)
+ *
+ * GPIO32.. live in bank 1, whose line numbers start at 0: line = GPIO - 32.
+ * The boot shim switches the slot's I/O rail (LDO4, 3.3 V) on; the GPIO
+ * driver moves the pads to the GPIO function when a line is requested.
+ * No card-detect line is wired, so mmc_spi polls.
+ */
+/ {
+	spi_sd: spi-sd {
+		compatible = "spi-gpio";
+		sck-gpios = <&gpio1 11 GPIO_ACTIVE_HIGH>;
+		mosi-gpios = <&gpio1 12 (GPIO_ACTIVE_HIGH | GPIO_PULL_UP)>;
+		miso-gpios = <&gpio1 7 (GPIO_ACTIVE_HIGH | GPIO_PULL_UP)>;
+		cs-gpios = <&gpio1 10 GPIO_ACTIVE_LOW>;
+		num-chipselects = <1>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		sdcard@0 {
+			compatible = "mmc-spi-slot";
+			reg = <0>;
+			spi-max-frequency = <4000000>;
+			voltage-ranges = <3200 3400>;
+		};
+	};
+};
+
+/*
+ * Tab5 RS485 (SIT3088) on UART1: TX GPIO20, RX GPIO21, DIR GPIO34 (M5Stack
+ * pin table).  The boot shim clocks UART1 from XTAL / 4 (10 MHz, so 9600
+ * baud fits the 12-bit divider), routes the three pads through the GPIO
+ * matrix and leaves the UART core to Linux (patch 0079).  DIR is the UART's
+ * RTS output; "linux,rs485-enabled-at-boot-time" puts the port in hardware
+ * half-duplex mode, where RTS rises only while a character is being sent.
+ * It appears as /dev/ttyS2 (serial0 is UART0, serial1 the USB serial/JTAG).
+ * CLIC slot 25 / INTMTX source 32 (ETS_UART1_INTR_SOURCE).
+ */
+/ {
+	aliases {
+		serial2 = &uart1;
+		serial3 = &uart2;
+	};
+
+	uart1_sclk: uart1-sclk {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <10000000>;
+		clock-output-names = "uart1-sclk";
+	};
+
+	uart2_sclk: uart2-sclk {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <10000000>;
+		clock-output-names = "uart2-sclk";
+	};
+};
+
+&soc {
+	uart1: serial@500cb000 {
+		compatible = "esp,esp32p4-uart";
+		reg = <0x500cb000 0x1000>;
+		interrupts-extended = <&clic0 25 32 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&uart1_sclk>;
+		linux,rs485-enabled-at-boot-time;
+		status = "okay";
+	};
+
+	/* Grove UART, see the Grove comment below.  CLIC slot 26 / source 33. */
+	uart2: serial@500cc000 {
+		compatible = "esp,esp32p4-uart";
+		reg = <0x500cc000 0x1000>;
+		interrupts-extended = <&clic0 26 33 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&uart2_sclk>;
+		status = "okay";
+	};
+};
+
+/*
+ * Tab5 Grove port (HY2.0-4P, PORT.A): yellow G53, white G54 (case label).
+ * The pads carry either UART2 (/dev/ttyS3) or this bit-banged I2C bus, never
+ * both.  The M5Stack PORT.A colour convention gives yellow = SDA, white =
+ * SCL for I2C and yellow = host TX, white = host RX for UART; the case only
+ * labels the GPIO numbers, so both assignments are still to be confirmed
+ * with a real Unit.  The boot shim only clocks UART2.  grove-mode (run by
+ * S42grove, setting kept in /boot/grove.txt) writes the GPIO matrix and
+ * binds or unbinds this i2c-gpio device, so switching needs no rebuild.
+ * Default is UART (Unit DMX).  G53/G54 are GPIO53/54, i.e. bank 1 lines
+ * 21 and 22.
+ */
+/ {
+	i2c_grove: i2c-grove {
+		compatible = "i2c-gpio";
+		sda-gpios = <&gpio1 21 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN | GPIO_PULL_UP)>;
+		scl-gpios = <&gpio1 22 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN | GPIO_PULL_UP)>;
+		i2c-gpio,delay-us = <5>;	/* about 100 kHz */
+		#address-cells = <1>;
+		#size-cells = <0>;
+	};
+};

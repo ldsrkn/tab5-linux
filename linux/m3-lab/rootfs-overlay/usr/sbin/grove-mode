@@ -1,0 +1,118 @@
+#!/bin/sh
+# Tab5 Grove port (PORT.A, G53 yellow / G54 white): UART2 (/dev/ttyS3) or I2C.
+#
+#   grove-mode           show the current mode
+#   grove-mode uart      switch now and remember it (/boot/grove.txt)
+#   grove-mode i2c       switch now and remember it
+#   grove-mode boot      apply the remembered mode (S42grove; default uart)
+#
+# The boot shim leaves both pads unrouted.  The mode is set here by writing the
+# GPIO matrix and IO_MUX through /dev/mem (BusyBox devmem), then binding or
+# unbinding the i2c-gpio device "i2c-grove".  Pad numbers and register layout
+# (ESP32-P4 TRM, IDF hw_ver1 gpio_reg.h):
+#   GPIO base 0x500E0000, IO_MUX base 0x500E1000
+#   FUNCn_OUT_SEL_CFG = base + 0x558 + 4*n   [8:0] signal, [10] OEN_SEL
+#   FUNCsig_IN_SEL_CFG = base + 0x158 + 4*sig  [5:0] pad, [7] via matrix
+#   ENABLE1_W1TC = base + 0x34 (GPIO32+, bit = pin - 32)
+#   IO_MUX pin n = 0x500E1000 + 4 + 4*n: WPD b7, WPU b8, IE b9, MCU_SEL [14:12]
+#   UART2: TXD out signal 16, RXD in signal 16.  Plain GPIO out signal 256.
+# NOMMU: every exec is a ~0.5 MB BusyBox copy, so keep the command count low.
+
+SDA=53
+SCL=54
+CFG=/boot/grove.txt
+DRV=/sys/bus/platform/drivers/i2c-gpio
+DEV=i2c-grove
+
+out_sel() { echo $((0x500E0000 + 0x558 + 4 * $1)); }
+iomux()  { echo $((0x500E1000 + 4 + 4 * $1)); }
+
+# iomux_set PIN PULLUP: MCU_SEL = GPIO matrix, input enabled, pull as asked.
+iomux_set() {
+	a=$(iomux $1)
+	v=$(devmem $a 32) || return 1
+	v=$(( (v & ~0x7180) | 0x1200 | ($2 << 8) ))
+	devmem $a 32 $v
+}
+
+is_bound() { [ -e "$DRV/$DEV" ]; }
+
+# Only the Tab5 device tree has the i2c-grove device; stay off the pads elsewhere.
+if [ ! -e /sys/bus/platform/devices/$DEV ] && ! is_bound; then
+	echo "grove-mode: no Grove port on this board" >&2
+	exit 0
+fi
+
+set_uart() {
+	is_bound && echo $DEV > $DRV/unbind
+	# both pads: output enable off (UART TX uses the peripheral's own enable)
+	devmem $((0x500E0000 + 0x34)) 32 $(( (1 << (SDA - 32)) | (1 << (SCL - 32)) ))
+	devmem $(out_sel $SDA) 32 16
+	devmem $(out_sel $SCL) 32 256
+	iomux_set $SDA 0
+	iomux_set $SCL 1
+	devmem $((0x500E0000 + 0x158 + 4 * 16)) 32 $((0x80 | SCL))
+}
+
+set_i2c() {
+	# plain GPIO signal with the output enable under software (ENABLE) control
+	devmem $(out_sel $SDA) 32 $((256 | (1 << 10)))
+	devmem $(out_sel $SCL) 32 $((256 | (1 << 10)))
+	is_bound || echo $DEV > $DRV/bind
+}
+
+current() {
+	o=$(devmem $(out_sel $SDA) 32) || { echo unknown; return; }
+	if [ $((o & 0x1FF)) -eq 16 ]; then
+		echo uart
+	elif is_bound; then
+		echo i2c
+	else
+		echo unrouted
+	fi
+}
+
+saved() {
+	m=uart
+	if [ -f $CFG ]; then
+		read m < $CFG
+	fi
+	case "$m" in
+		uart|i2c) echo $m ;;
+		*) echo uart ;;
+	esac
+}
+
+apply() {
+	case "$1" in
+		uart) set_uart ;;
+		i2c) set_i2c ;;
+	esac
+}
+
+case "${1:-status}" in
+	status)
+		echo "Grove: $(current) (boot default: $(saved))"
+		case "$(current)" in
+			uart) echo "  serial: /dev/ttyS3, TX G$SDA (yellow), RX G$SCL (white)" ;;
+			i2c) echo "  i2c: see 'i2cdetect -l' (SDA G$SDA yellow, SCL G$SCL white)" ;;
+		esac
+		;;
+	uart|i2c)
+		apply $1
+		echo "Grove: $(current)"
+		if [ "$(saved)" != "$1" ] || [ ! -f $CFG ]; then
+			echo $1 > $CFG && echo "saved to $CFG (becomes the boot default)" ||
+				echo "could not write $CFG, the mode is kept until reboot"
+		fi
+		;;
+	boot)
+		apply "$(saved)"
+		echo "Grove: $(current)"
+		;;
+	*)
+		echo "Usage: $0 [status|uart|i2c|boot]" >&2
+		exit 1
+		;;
+esac
+exit 0

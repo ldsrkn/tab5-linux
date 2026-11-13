@@ -32,3 +32,13 @@ CONFIG_INPUT_KEYBOARD=y
 CONFIG_KEYBOARD_M5STACK_TAB5=y
 CONFIG_I2C=y
 CONFIG_I2C_GPIO=y
+# /dev/i2c-N for i2cdetect/i2cget (BusyBox) on the bit-banged buses.
+CONFIG_I2C_CHARDEV=y
+
+# microSD slot in SPI mode (spi-gpio + mmc_spi on GPIO39/42/43/44); FAT and
+# the MMC block layer come from the m2 / m3-lab fragments.
+CONFIG_SPI=y
+CONFIG_SPI_GPIO=y
+CONFIG_MMC_SPI=y
+# grove-mode writes the GPIO matrix through /dev/mem (BusyBox devmem).
+CONFIG_DEVMEM=y

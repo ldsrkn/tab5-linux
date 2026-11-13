@@ -164,6 +164,21 @@ Committed `linux.config` remains `CONFIG_SMP=n` and the board DTS remains
 `cpu@0` only. The C68 profile appends `linux/c68/linux.config.fragment` and
 inserts `linux/c68/cpu1.dts.inc` at build time.
 
+`0079-easystick-esp32p4-uart-regs-rs485.patch` is Tab5-only (it follows 0001,
+0025, 0027 and 0062 on `drivers/tty/serial/esp32_uart.c`).  The P4 variant of
+`esp32_uart` borrowed the ESP32-S3 register map for everything but the FIFO
+fields; UART0 never noticed because the boot ROM leaves it configured.  UART1
+(the Tab5's SIT3088 RS485 transceiver) needs the real layout from
+IDF `soc/esp32p4/register/hw_ver1/soc/uart_reg.h`: `UART_REG_UPDATE` (0x98)
+after writes to the "sync" registers (CLKDIV, CONF0, RS485_CONF), SW_RTS and
+LOOPBACK inside CONF0, RTS_INV/SW_DTR/DTR_INV inside CONF1, and idle
+detection from TXFIFO_CNT plus ST_UTX_OUT.  It adds hardware RS485
+half-duplex through the serial core's `rs485_config` hook (IDF
+`uart_ll_set_mode_rs485_half_duplex()`), selectable with
+`linux,rs485-enabled-at-boot-time`.  The source clock and divider are in
+HP_SYS_CLKRST and are set by the boot shim (`tab5_rs485_uart_init()`).
+Compile-checked only (riscv64 cross compiler, W=1); not yet run on hardware.
+
 This directory documents a real dependency boundary while the series is
 still under review. A clean build must fail early if the baseline symbols are
 absent rather than silently dropping UART, watchdog, or NOMMU support during

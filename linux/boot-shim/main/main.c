@@ -739,6 +739,11 @@ void app_main(void)
 #else
 	/* The panel's DSI init runs in Linux; it only needs reset and light. */
 	tab5_lcd_power_on();
+	/* microSD I/O rail; Linux drives the slot in SPI mode. */
+	tab5_sd_power_on();
+	/* UART1 on the RS485 transceiver; Linux drives the UART core. */
+	tab5_rs485_uart_init();
+	tab5_grove_uart_init();
 #endif
 	const esp_partition_t *kernel = esp_partition_find_first(
 		ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, "kernel");

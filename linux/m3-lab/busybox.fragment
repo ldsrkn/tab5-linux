@@ -82,7 +82,12 @@ CONFIG_NTPD=y
 # CONFIG_ZCAT is not set
 
 # 5. Miscellaneous non-essential CLI utilities (~25KB)
-# CONFIG_STTY is not set
+# Tab5: serial ports (RS485) and I2C buses are real peripherals now.
+CONFIG_STTY=y
+CONFIG_I2CGET=y
+CONFIG_I2CSET=y
+CONFIG_I2CDUMP=y
+CONFIG_I2CDETECT=y
 # CONFIG_HEXEDIT is not set
 # CONFIG_TREE is not set
 # CONFIG_FOLD is not set

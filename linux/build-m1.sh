@@ -864,7 +864,7 @@ fi
 # M5Stack Tab5 display: WHY2025's ESP32-P4 DSI glue (0003, read from the
 # locked reference), its commit-tail rework without the badge DTS hunk
 # (0073), mode-derived DPI clock and a direct blit (0074), ST7123 panel (0075);
-# Tab5 Keyboard (0076).
+# Tab5 Keyboard (0076), P4 UART registers + RS485 (0079).
 if [[ "${EASYSTICK_BOARD:-stamp-p4}" == tab5 ]]; then
 	patches+=(0003-drm-mipi-dsi-esp32p4.patch)
 	patches+=(0073-easystick-esp32p4-dsi-commit-tail.patch)
@@ -880,6 +880,8 @@ if [[ "${EASYSTICK_BOARD:-stamp-p4}" == tab5 ]]; then
 		*) echo "unsupported EASYSTICK_TAB5_PANEL: ${EASYSTICK_TAB5_PANEL}" >&2; exit 2 ;;
 	esac
 	patches+=(0076-input-m5stack-tab5-keyboard.patch)
+	# P4 UART register layout + RS485 half-duplex (UART1 = the SIT3088).
+	patches+=(0079-easystick-esp32p4-uart-regs-rs485.patch)
 fi
 for patch_name in "${patches[@]}"; do
 	if [[ "$patch_name" == 0022-esp32p4-systimer-level-trigger.patch ||
@@ -919,6 +921,7 @@ for patch_name in "${patches[@]}"; do
 	      "$patch_name" == 0076-input-m5stack-tab5-keyboard.patch ||
 	      "$patch_name" == 0077-drm-panel-m5stack-tab5-ili9881c.patch ||
 	      "$patch_name" == 0078-input-m5stack-tab5-gt911.patch ||
+	      "$patch_name" == 0079-easystick-esp32p4-uart-regs-rs485.patch ||
 	      "$patch_name" == 0056-easystick-wdt-stacktrace.patch ||
 	      "$patch_name" == 0055-easystick-sdio-clock-attest.patch ||
 	      "$patch_name" == 0060-easystick-dw-mmc-tx-software-dto.patch ||

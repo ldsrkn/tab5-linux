@@ -1,0 +1,293 @@
+From: Egor Sorokin <egor.sorokin.ld@gmail.com>
+Subject: [PATCH] serial: esp32_uart: ESP32-P4 register layout and RS485
+
+The P4 variant of the esp32_uart driver reused the ESP32-S3 register map
+for everything except the FIFO fields.  UART0 got away with it because the
+boot ROM leaves it configured; UART1..4 need the real layout:
+
+ - CLK_CONF is at 0x88 on the P4 (0x78 is the read-only NEGPULSE
+   register) and only gates/resets the RX/TX clocks; the source clock and
+   its divider are in HP_SYS_CLKRST and are set by the boot shim.
+ - CLKDIV, CONF0 and RS485_CONF are "sync" registers that only take effect
+   after UART_REG_UPDATE (0x98).
+ - SW_RTS and LOOPBACK are in CONF0 at bits 21 and 12; RTS_INV, SW_DTR and
+   DTR_INV are in CONF1 at bits 18, 20 and 19 (the S3 positions made
+   set_mctrl() toggle TXD_BRK).
+ - The transmitter is idle only when TXFIFO_CNT == 0 and ST_UTX_OUT == 0
+   (IDF uart_ll_is_tx_idle()).
+
+Add hardware RS485 half-duplex (IDF uart_ll_set_mode_rs485_half_duplex():
+RS485_EN, DL0/DL1, SW_RTS = 1) through the serial core's rs485_config
+hook, so "linux,rs485-enabled-at-boot-time" in the DT is enough to have
+the hardware drive RTS (the transceiver's DIR) during transmission.
+Hardware flow control is masked out on the P4 (its RX flow control is in
+HWFC_CONF_SYNC, not implemented).
+
+---
+ drivers/tty/serial/esp32_uart.c | 0
+ 1 file changed
+
+--- a/drivers/tty/serial/esp32_uart.c
++++ b/drivers/tty/serial/esp32_uart.c
+@@ -83,6 +83,30 @@
+ #define ESP32S3_UART_TX_RST_CORE		BIT(26)
+ #define ESP32S3_UART_RX_RST_CORE		BIT(27)
+ 
++/*
++ * ESP32-P4 register layout (IDF soc/esp32p4/register/hw_ver1/soc/uart_reg.h).
++ * FIFO, INT_*, CLKDIV, STATUS and CONF1's FIFO thresholds sit where they do
++ * on the S3, but the rest does not: the S3 CLK_CONF (0x78) is the read-only
++ * NEGPULSE register here, the source clock and its divider live in
++ * HP_SYS_CLKRST (set up by the boot shim), SW_RTS/LOOPBACK moved inside
++ * CONF0, and RTS_INV/SW_DTR/DTR_INV moved to CONF1.  CLKDIV, CONF0 and the
++ * RS485 configuration are "sync" registers: a write only takes effect after
++ * UART_REG_UPDATE copies them into the UART core clock domain.
++ */
++#define ESP32P4_UART_CONF0_LOOPBACK		BIT(12)
++#define ESP32P4_UART_CONF0_SW_RTS		BIT(21)
++#define ESP32P4_UART_CONF1_RTS_INV		BIT(18)
++#define ESP32P4_UART_CONF1_DTR_INV		BIT(19)
++#define ESP32P4_UART_CONF1_SW_DTR		BIT(20)
++#define ESP32P4_UART_RS485_CONF_REG		0x4c
++#define ESP32P4_UART_RS485_EN			BIT(0)
++#define ESP32P4_UART_RS485_DL0_EN		BIT(1)
++#define ESP32P4_UART_RS485_DL1_EN		BIT(2)
++#define ESP32P4_UART_FSM_STATUS_REG		0x70
++#define ESP32P4_UART_ST_UTX_OUT			GENMASK(7, 4)
++#define ESP32P4_UART_REG_UPDATE_REG		0x98
++#define ESP32P4_UART_REG_UPDATE			BIT(0)
++
+ #define ESP32S3_UART_CLK_CONF_DEFAULT \
+ 	(ESP32S3_UART_RX_SCLK_EN | \
+ 	 ESP32S3_UART_TX_SCLK_EN | \
+@@ -102,6 +126,7 @@
+ 	u32 rx_flow_en;
+ 	const char *type;
+ 	bool has_clkconf;
++	bool p4;
+ };
+ 
+ static const struct esp32_uart_variant esp32_variant = {
+@@ -125,8 +150,10 @@
+ 
+ /*
+  * ESP32-P4 (hw_ver1): same TXFIFO/RXFIFO field positions as ESP32 (bits[23:16]
+- * and bits[7:0] respectively), but 12-bit clkdiv like ESP32S3, and has
+- * clk_conf register.
++ * and bits[7:0] respectively) and 12-bit clkdiv like ESP32S3, but not the
++ * S3 clk_conf register (see ESP32P4_UART_* above).  RX/TX clock gating
++ * defaults to enabled, the source clock and divider are fixed by the boot
++ * shim, and hardware flow control is not supported by this driver.
+  */
+ static const struct esp32_uart_variant esp32p4_variant = {
+ 	.clkdiv_mask = ESP32S3_UART_CLKDIV,
+@@ -135,7 +162,7 @@
+ 	.txfifo_empty_thrhd_shift = ESP32_UART_TXFIFO_EMPTY_THRHD_SHIFT,
+ 	.rx_flow_en = ESP32_UART_RX_FLOW_EN,
+ 	.type = "ESP32-P4 UART",
+-	.has_clkconf = true,
++	.p4 = true,
+ };
+ 
+ static const struct of_device_id esp32_uart_dt_ids[] = {
+@@ -169,6 +196,25 @@
+ 	return readl(port->membase + reg);
+ }
+ 
++/* Latch CLKDIV/CONF0/RS485 writes into the UART core clock domain (P4). */
++static void esp32_uart_sync(struct uart_port *port)
++{
++	int i;
++
++	if (!port_variant(port)->p4)
++		return;
++
++	esp32_uart_write(port, ESP32P4_UART_REG_UPDATE_REG,
++			 ESP32P4_UART_REG_UPDATE);
++	for (i = 0; i < 1000; i++) {
++		if (!(esp32_uart_read(port, ESP32P4_UART_REG_UPDATE_REG) &
++		      ESP32P4_UART_REG_UPDATE))
++			return;
++		udelay(1);
++	}
++	dev_warn_once(port->dev, "REG_UPDATE did not complete\n");
++}
++
+ static u32 esp32_uart_tx_fifo_cnt(struct uart_port *port)
+ {
+ 	u32 status = esp32_uart_read(port, UART_STATUS_REG);
+@@ -186,12 +232,51 @@
+ /* return TIOCSER_TEMT when transmitter is not busy */
+ static unsigned int esp32_uart_tx_empty(struct uart_port *port)
+ {
+-	return esp32_uart_tx_fifo_cnt(port) ? 0 : TIOCSER_TEMT;
++	if (esp32_uart_tx_fifo_cnt(port))
++		return 0;
++	/* The shift register may still be sending the last character. */
++	if (port_variant(port)->p4 &&
++	    (esp32_uart_read(port, ESP32P4_UART_FSM_STATUS_REG) &
++	     ESP32P4_UART_ST_UTX_OUT))
++		return 0;
++	return TIOCSER_TEMT;
+ }
+ 
+-static void esp32_uart_set_mctrl(struct uart_port *port, unsigned int mctrl)
++static void esp32p4_uart_set_mctrl(struct uart_port *port, unsigned int mctrl)
+ {
+ 	u32 conf0 = esp32_uart_read(port, UART_CONF0_REG);
++	u32 conf1 = esp32_uart_read(port, UART_CONF1_REG);
++
++	conf0 &= ~(ESP32P4_UART_CONF0_LOOPBACK | ESP32P4_UART_CONF0_SW_RTS);
++	conf1 &= ~(ESP32P4_UART_CONF1_SW_DTR | ESP32P4_UART_CONF1_DTR_INV);
++
++	/*
++	 * In RS485 half-duplex mode SW_RTS must stay set: it is the receive
++	 * state, and the hardware raises RTS (the transceiver's DIR) only
++	 * while it transmits.  Clearing it on close would leave DIR high.
++	 */
++	if ((mctrl & TIOCM_RTS) || (port->rs485.flags & SER_RS485_ENABLED))
++		conf0 |= ESP32P4_UART_CONF0_SW_RTS;
++	if (mctrl & TIOCM_DTR)
++		conf1 |= ESP32P4_UART_CONF1_SW_DTR;
++	if (mctrl & TIOCM_LOOP)
++		conf0 |= ESP32P4_UART_CONF0_LOOPBACK;
++
++	esp32_uart_write(port, UART_CONF0_REG, conf0);
++	esp32_uart_write(port, UART_CONF1_REG, conf1);
++	esp32_uart_sync(port);
++}
++
++static void esp32_uart_set_mctrl(struct uart_port *port, unsigned int mctrl)
++{
++	u32 conf0;
++
++	if (port_variant(port)->p4) {
++		esp32p4_uart_set_mctrl(port, mctrl);
++		return;
++	}
++
++	conf0 = esp32_uart_read(port, UART_CONF0_REG);
+ 
+ 	conf0 &= ~(UART_LOOPBACK |
+ 		   UART_SW_RTS | UART_RTS_INV |
+@@ -417,9 +502,19 @@
+ 	if (port_variant(port)->has_clkconf)
+ 		esp32_uart_write(port, ESP32S3_UART_CLK_CONF_REG,
+ 				 ESP32S3_UART_CLK_CONF_DEFAULT);
+-	esp32_uart_write(port, UART_CONF1_REG,
+-			 (1 << UART_RXFIFO_FULL_THRHD_SHIFT) |
+-			 (1 << port_variant(port)->txfifo_empty_thrhd_shift));
++	if (port_variant(port)->p4) {
++		/* Keep RTS_INV/SW_DTR/... that rs485_config or mctrl set. */
++		u32 conf1 = esp32_uart_read(port, UART_CONF1_REG);
++
++		conf1 &= ~(GENMASK(7, 0) | GENMASK(15, 8));
++		conf1 |= (1 << UART_RXFIFO_FULL_THRHD_SHIFT) |
++			 (1 << port_variant(port)->txfifo_empty_thrhd_shift);
++		esp32_uart_write(port, UART_CONF1_REG, conf1);
++	} else {
++		esp32_uart_write(port, UART_CONF1_REG,
++				 (1 << UART_RXFIFO_FULL_THRHD_SHIFT) |
++				 (1 << port_variant(port)->txfifo_empty_thrhd_shift));
++	}
+ 	esp32_uart_write(port, UART_INT_CLR_REG, UART_RXFIFO_FULL_INT | UART_BRK_DET_INT);
+ 	esp32_uart_write(port, UART_INT_ENA_REG, UART_RXFIFO_FULL_INT | UART_BRK_DET_INT);
+ 	spin_unlock_irqrestore(&port->lock, flags);
+@@ -458,6 +553,7 @@
+ 
+ 		esp32_uart_write(port, UART_CLKDIV_REG,
+ 				 div | FIELD_PREP(UART_CLKDIV_FRAG, frag));
++		esp32_uart_sync(port);
+ 		return true;
+ 	}
+ 
+@@ -475,6 +571,9 @@
+ 	u32 max_div = port_variant(port)->clkdiv_mask;
+ 
+ 	termios->c_cflag &= ~CMSPAR;
++	/* P4's RX flow control lives in HWFC_CONF_SYNC; not wired up here. */
++	if (port_variant(port)->p4)
++		termios->c_cflag &= ~CRTSCTS;
+ 
+ 	if (port_variant(port)->has_clkconf)
+ 		max_div *= FIELD_MAX(ESP32S3_UART_SCLK_DIV_NUM);
+@@ -522,6 +621,7 @@
+ 
+ 	esp32_uart_write(port, UART_CONF0_REG, conf0);
+ 	esp32_uart_write(port, UART_CONF1_REG, conf1);
++	esp32_uart_sync(port);
+ 
+ 	if (baud) {
+ 		esp32_uart_set_baud(port, baud);
+@@ -540,6 +640,56 @@
+ 	spin_unlock_irqrestore(&port->lock, flags);
+ }
+ 
++/*
++ * RS485 on the P4 UART is IDF's half-duplex mode (uart_ll_set_mode_rs485_
++ * half_duplex): with RS485_EN set and SW_RTS = 1 the RTS pin idles low
++ * ("generates low level on RTS pin", IDF uart_ll.h) and the hardware raises
++ * it for the duration of a transmission, which is how the Tab5's SIT3088
++ * gets its DIR line (GPIO34).  DL0/DL1 add the one-bit guard delays IDF
++ * uses.  RTS_INV flips the polarity for transceivers with active-low DE.
++ */
++static int esp32_uart_rs485_config(struct uart_port *port,
++				   struct ktermios *termios,
++				   struct serial_rs485 *rs485)
++{
++	u32 conf0 = esp32_uart_read(port, UART_CONF0_REG);
++	u32 conf1 = esp32_uart_read(port, UART_CONF1_REG);
++	u32 rs485_conf = 0;
++
++	if (rs485->flags & SER_RS485_ENABLED) {
++		/* Hardware drives RTS with no delay control: the ON/AFTER levels
++		 * must be opposite, and only that pair is meaningful. */
++		if (rs485->flags & SER_RS485_RTS_ON_SEND)
++			rs485->flags &= ~SER_RS485_RTS_AFTER_SEND;
++		else
++			rs485->flags |= SER_RS485_RTS_AFTER_SEND;
++		rs485->delay_rts_before_send = 0;
++		rs485->delay_rts_after_send = 0;
++
++		rs485_conf = ESP32P4_UART_RS485_EN | ESP32P4_UART_RS485_DL0_EN |
++			     ESP32P4_UART_RS485_DL1_EN;
++		conf0 |= ESP32P4_UART_CONF0_SW_RTS;
++		if (rs485->flags & SER_RS485_RTS_ON_SEND)
++			conf1 &= ~ESP32P4_UART_CONF1_RTS_INV;
++		else
++			conf1 |= ESP32P4_UART_CONF1_RTS_INV;
++	} else {
++		conf1 &= ~ESP32P4_UART_CONF1_RTS_INV;
++	}
++
++	esp32_uart_write(port, UART_CONF0_REG, conf0);
++	esp32_uart_write(port, UART_CONF1_REG, conf1);
++	esp32_uart_write(port, ESP32P4_UART_RS485_CONF_REG, rs485_conf);
++	esp32_uart_sync(port);
++
++	return 0;
++}
++
++static const struct serial_rs485 esp32p4_uart_rs485_supported = {
++	.flags = SER_RS485_ENABLED | SER_RS485_RTS_ON_SEND |
++		 SER_RS485_RTS_AFTER_SEND,
++};
++
+ static const char *esp32_uart_type(struct uart_port *port)
+ {
+ 	return port_variant(port)->type;
+@@ -862,6 +1012,14 @@
+ 	port->fifosize = ESP32_UART_TX_FIFO_SIZE;
+ 	port->private_data = (void *)device_get_match_data(&pdev->dev);
+ 
++	if (port_variant(port)->p4) {
++		port->rs485_config = esp32_uart_rs485_config;
++		port->rs485_supported = esp32p4_uart_rs485_supported;
++		ret = uart_get_rs485_mode(port);
++		if (ret)
++			return ret;
++	}
++
+ 	esp32_uart_ports[port->line] = sport;
+ 
+ 	platform_set_drvdata(pdev, port);
