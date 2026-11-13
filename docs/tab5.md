@@ -158,7 +158,15 @@ What changes relative to the default build:
   driving GPIO23 high, which makes the GT911 answer at 0x14, then releases
   GPIO23 as an input.
 
-Not verified on hardware yet: the DSI lane rate (the glue uses a fixed
-1000 Mbit/s, M5GFX uses 1040), the ESP32-P4 revision v1.0 behaviour (upstream
-was tested on v1.3), and the coordinate mapping against the rotated fbcon
-(`fbcon=rotate:1`; touch reports the native 720x1280 portrait frame).
+- `tab5-ili9881c.dtsi` also overrides the console rotation to `fbcon=rotate:3`
+  (this panel sits 180 degrees from the ST7123 units' `rotate:1`) and holds
+  GPIO23 (TP_INT) low through a `gpio-hog`.  On the GT911 units that line has
+  a pull-up to 3V3 which keeps the controller from scanning (see NuttX's
+  esp32p4-tab5 board page); with the line low, the polled driver gets multi-touch
+  events.  Without the hog the configuration registers read as zero and the
+  ready flag never rises.  Polling starts when `/dev/input/event1` is opened.
+
+Verified on a Tab5 (ESP32-P4 v1.0, ILI9881C): panel, touch, keyboard.  Not
+verified yet: the DSI lane rate (the glue uses a fixed 1000 Mbit/s, M5GFX uses
+1040), and the coordinate mapping against the rotated fbcon (touch reports the
+native 720x1280 portrait frame).

@@ -39,3 +39,28 @@
 		};
 	};
 };
+
+/*
+ * This panel is mounted rotated by 180 degrees relative to the ST7123 units
+ * that fbcon=rotate:1 was chosen for, so rotate the console the other way.
+ */
+/ {
+	chosen {
+		bootargs = "earlycon=esp32p4usbjtag,mmio32,0x500d2000 console=tty0 console=ttyGS1,115200n8 loglevel=4 root=/dev/mtdblock0 rootfstype=squashfs ro init=/sbin/init maxcpus=1 fbcon=rotate:3 fbcon=font:TER16x32";
+	};
+};
+
+/*
+ * TP_INT (GPIO23) has a pull-up to 3V3 on the GT911 units, which keeps the
+ * controller from scanning (NuttX esp32p4-tab5 documentation); the board has
+ * to drive it low and read the touch data by polling.  Make it a hog so the
+ * GPIO driver owns the line, as it must for the backlight enable above.
+ */
+&gpio0 {
+	touch-int-hog {
+		gpio-hog;
+		gpios = <23 GPIO_ACTIVE_HIGH>;
+		output-low;
+		line-name = "touch-int";
+	};
+};
