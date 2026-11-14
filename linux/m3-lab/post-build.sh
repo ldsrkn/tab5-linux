@@ -67,7 +67,7 @@ rm -f "${TARGET_DIR}/etc/init.d/S01syslogd" \
 # Remove applet symlinks whose applet is not built into this BusyBox, so users
 # get "not found" from the shell instead of "applet not found".
 for applet in \
-	base32 dnsdomainname link nuke resume setpriv setserial stty zcat \
+	base32 dnsdomainname link nuke resume setpriv setserial zcat \
 	freeramdisk hwclock ifdown ifup ip ipaddr iplink iproute mkdosfs \
 	start-stop-daemon ascii bc bzcat cksum crc32 dos2unix factor fallocate \
 	fold getfattr hexedit lsscsi lzcat lzopcat mesg nl nproc od paste \
