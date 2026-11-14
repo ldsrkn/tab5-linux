@@ -707,9 +707,34 @@ static void prepare_cpu1_linux_trampoline(uint32_t entry, uint32_t dtb_pa)
 #define EASYSTICK_GIT_REV "unknown"
 #endif
 
+/*
+ * The reason for the reset that started this boot, printed once at start:
+ * a crash that leaves no pstore record (batch1, 2026-11-14) can then be
+ * told apart from a clean power-on, software or watchdog reset on the
+ * next boot's console capture.
+ */
+static const char *reset_reason_name(esp_reset_reason_t r)
+{
+	switch (r) {
+	case ESP_RST_POWERON:	return "poweron";
+	case ESP_RST_EXT:	return "ext";
+	case ESP_RST_SW:	return "sw";
+	case ESP_RST_PANIC:	return "panic";
+	case ESP_RST_INT_WDT:	return "int_wdt";
+	case ESP_RST_TASK_WDT:	return "task_wdt";
+	case ESP_RST_WDT:	return "wdt";
+	case ESP_RST_BROWNOUT:	return "brownout";
+	case ESP_RST_SDIO:	return "sdio";
+	case ESP_RST_DEEPSLEEP:	return "deepsleep";
+	default:		return "other";
+	}
+}
+
 void app_main(void)
 {
 	ESP_LOGI(TAG, "boot-shim git=%s", EASYSTICK_GIT_REV);
+	ESP_LOGI(TAG, "reset reason=%d (%s)", (int)esp_reset_reason(),
+		 reset_reason_name(esp_reset_reason()));
 #ifdef EASYSTICK_CMD53_RETENTION_BB
 	/*
 	 * Retention dump must run before C6/SDIO/Linux handoff. Do not clear
