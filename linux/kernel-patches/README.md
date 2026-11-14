@@ -179,6 +179,15 @@ half-duplex through the serial core's `rs485_config` hook (IDF
 HP_SYS_CLKRST and are set by the boot shim (`tab5_rs485_uart_init()`).
 Compile-checked only (riscv64 cross compiler, W=1); not yet run on hardware.
 
+`0080-easystick-esp32-uart-5-ports.patch` is Tab5-only and follows 0079 on
+`drivers/tty/serial/esp32_uart.c`.  The driver's `UART_NR` is 3, so aliases
+`serial0..serial2` fit; the Tab5's device tree adds alias `serial3` for the
+Grove port (UART2 at 500cc000), and that port failed its probe on every
+batch1 boot (`driver limited to 3 serial ports`, `-ENOMEM`), so `/dev/ttyS3`
+never appeared.  The patch raises `UART_NR` to 5 (the P4 has five UART
+cores); boards whose device trees carry no alias that high are unaffected.
+Compile-checked only; not yet run on hardware.
+
 This directory documents a real dependency boundary while the series is
 still under review. A clean build must fail early if the baseline symbols are
 absent rather than silently dropping UART, watchdog, or NOMMU support during

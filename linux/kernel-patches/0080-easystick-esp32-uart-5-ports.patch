@@ -1,0 +1,35 @@
+Subject: [PATCH] serial: esp32_uart: allow five ports for the ESP32-P4
+
+UART_NR is 3 in the driver, so aliases serial0..serial2 fit. The P4 has
+five UART cores and the M5Stack Tab5 uses alias serial3 (Grove, UART2 at
+500cc000) on top of serial0 (the console) and serial2 (RS485, UART1 at
+500cb000): the Grove port failed its probe on every batch1 boot with
+
+  esp32-uart 500cc000.serial: driver limited to 3 serial ports
+  esp32-uart 500cc000.serial: probe with driver esp32-uart failed with error -12
+
+and /dev/ttyS3 never appeared. Allow five; ESP32 and ESP32-S3 boards
+carry no alias that high, so their behaviour does not change.
+
+---
+ drivers/tty/serial/esp32_uart.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/tty/serial/esp32_uart.c b/drivers/tty/serial/esp32_uart.c
+--- a/drivers/tty/serial/esp32_uart.c
++++ b/drivers/tty/serial/esp32_uart.c
+@@ -18,7 +18,13 @@
+ 
+ #define DRIVER_NAME	"esp32-uart"
+ #define DEV_NAME	"ttyS"
+-#define UART_NR		3
++/*
++ * The ESP32-P4 has five UART cores (UART0..4); the M5Stack Tab5 uses
++ * alias serial3 for its Grove port next to serial0 (console) and
++ * serial2 (RS485). Boards with fewer UARTs carry no alias that high,
++ * so a larger array changes nothing for them.
++ */
++#define UART_NR		5
+ 
+ #define ESP32_UART_TX_FIFO_SIZE	127
+ #define ESP32_UART_RX_FIFO_SIZE	127
