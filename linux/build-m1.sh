@@ -2156,6 +2156,8 @@ if $lab_profile; then
 	set_config_value "${br_output}/.config" BR2_PACKAGE_BUSYBOX_DAEMONS y
 	# awk, less, tar, wget, top, ... from a third BusyBox, loaded only when run.
 	set_config_value "${br_output}/.config" BR2_PACKAGE_BUSYBOX_TOOLS y
+	# DMX512 sender for the Tab5 Grove port (Unit DMX): termios2/BOTHER.
+	set_config_value "${br_output}/.config" BR2_PACKAGE_DMXSEND y
 else
 	set_config_value "${br_output}/.config" BR2_PACKAGE_EASYSTICK_BOOT_COMMIT "# BR2_PACKAGE_EASYSTICK_BOOT_COMMIT is not set"
 fi
@@ -2340,7 +2342,8 @@ if $ssh_profile; then
 			"BR2_PACKAGE_EASYSTICK_MDNS=y" \
 			"BR2_PACKAGE_EASYSTICK_RESPAWN=y" \
 			"BR2_PACKAGE_BUSYBOX_DAEMONS=y" \
-			"BR2_PACKAGE_BUSYBOX_TOOLS=y"; do
+			"BR2_PACKAGE_BUSYBOX_TOOLS=y" \
+			"BR2_PACKAGE_DMXSEND=y"; do
 			grep -Fqx -- "${expected}" "${br_output}/.config" || {
 				echo "m3-lab config check failed: ${expected}" >&2
 				exit 1

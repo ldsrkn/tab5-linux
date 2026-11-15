@@ -1,0 +1,12 @@
+config BR2_PACKAGE_DMXSEND
+	bool "dmxsend"
+	help
+	  DMX512 sender for the Tab5 Grove port (M5Stack Unit DMX).
+	  Streams continuous DMX512 frames at 250000 baud 8N2 with a
+	  9600-baud zero-byte BREAK per DMX512-A.  The tight break-to-
+	  start-code gap (termios2/BOTHER speed switches in one process)
+	  is what the Unit DMX auto-direction transceiver needs; shell
+	  tools cannot provide it (~100 ms exec gaps per command).
+
+	  Speeds are set with termios2 because Linux has no B250000
+	  constant and BusyBox stty cannot select arbitrary rates.

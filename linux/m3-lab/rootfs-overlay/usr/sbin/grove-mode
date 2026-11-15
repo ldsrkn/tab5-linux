@@ -16,6 +16,12 @@
 #   ENABLE1_W1TC = base + 0x34 (GPIO32+, bit = pin - 32)
 #   IO_MUX pin n = 0x500E1000 + 4 + 4*n: WPD b7, WPU b8, IE b9, MCU_SEL [14:12]
 #   UART2: TXD out signal 16, RXD in signal 16.  Plain GPIO out signal 256.
+# UART wiring: TX on the WHITE wire (SCL/G54), RX on the YELLOW (SDA/G53).
+# The M5Stack Unit DMX takes data in on white and returns it on yellow:
+# the official M5Unit-DMX512 example drives transmit=17 (white) and
+# receive=16 (yellow) on the M5Core, and the Tab5 PORT.A follows the same
+# Grove colour convention (yellow = first data pin = G53).  Confirmed on
+# hardware: driving yellow only ever reached the unit's RO output.
 # NOMMU: every exec is a ~0.5 MB BusyBox copy, so keep the command count low.
 
 SDA=53
@@ -47,11 +53,12 @@ set_uart() {
 	is_bound && echo $DEV > $DRV/unbind
 	# both pads: output enable off (UART TX uses the peripheral's own enable)
 	devmem $((0x500E0000 + 0x34)) 32 $(( (1 << (SDA - 32)) | (1 << (SCL - 32)) ))
-	devmem $(out_sel $SDA) 32 16
-	devmem $(out_sel $SCL) 32 256
-	iomux_set $SDA 0
-	iomux_set $SCL 1
-	devmem $((0x500E0000 + 0x158 + 4 * 16)) 32 $((0x80 | SCL))
+	# TX on white (SCL/G54), RX on yellow (SDA/G53) - see the header note.
+	devmem $(out_sel $SCL) 32 16
+	devmem $(out_sel $SDA) 32 256
+	iomux_set $SCL 0
+	iomux_set $SDA 1
+	devmem $((0x500E0000 + 0x158 + 4 * 16)) 32 $((0x80 | SDA))
 }
 
 set_i2c() {
@@ -62,7 +69,7 @@ set_i2c() {
 }
 
 current() {
-	o=$(devmem $(out_sel $SDA) 32) || { echo unknown; return; }
+	o=$(devmem $(out_sel $SCL) 32) || { echo unknown; return; }
 	if [ $((o & 0x1FF)) -eq 16 ]; then
 		echo uart
 	elif is_bound; then
@@ -94,7 +101,7 @@ case "${1:-status}" in
 	status)
 		echo "Grove: $(current) (boot default: $(saved))"
 		case "$(current)" in
-			uart) echo "  serial: /dev/ttyS3, TX G$SDA (yellow), RX G$SCL (white)" ;;
+			uart) echo "  serial: /dev/ttyS3, TX G$SCL (white), RX G$SDA (yellow)" ;;
 			i2c) echo "  i2c: see 'i2cdetect -l' (SDA G$SDA yellow, SCL G$SCL white)" ;;
 		esac
 		;;
