@@ -55,6 +55,19 @@
 #include <unistd.h>
 /* termios2 lives in the kernel header; do not include <termios.h>. */
 #include <asm/termbits.h>
+/* TCGETS2/TCSETS2 live in the kernel ioctls header, not in libc's
+ * <sys/ioctl.h>: uClibc ships an old copy of the TIOC numbers there
+ * with no termios2 ioctls, and glibc does not export them portably
+ * either.  The kernel headers for riscv do ship <asm/ioctls.h>
+ * (asm-generic content) with TCGETS2/TCSETS2; the #ifndefs below are
+ * the fallback in case a libc chain pre-empted the kernel guard. */
+#include <asm/ioctls.h>
+#ifndef TCGETS2
+#define TCGETS2 0x802C542A /* _IOR('T', 0x2a, struct termios2); size 44 */
+#endif
+#ifndef TCSETS2
+#define TCSETS2 0x402C542B /* _IOW('T', 0x2b, struct termios2) */
+#endif
 
 #define FRAME_BYTES 513 /* start code + 512 slots */
 #define IN_FIFO "/run/dmx.in"
