@@ -1,0 +1,25 @@
+#!/bin/sh
+# DMX512 engine for the Tab5 Grove port: stream the universe from the
+# dmxsend daemon and take live channel updates on /run/dmx.in.
+# The terminal controller (dmxc.py) is plain Python deployed over SSH;
+# the show files live on the SD card (/sd/dmx).
+case "${1:-start}" in
+	start)
+		[ -x /usr/bin/dmxsend ] || exit 0
+		[ -c /dev/ttyS3 ] || exit 0
+		chmod 666 /dev/ttyS3 2>/dev/null
+		chmod 666 /dev/input/event0 2>/dev/null
+		mkdir -p /sd 2>/dev/null
+		mount -t vfat /dev/mmcblk0p1 /sd 2>/dev/null
+		# the daemon also creates these, but with its own umask;
+		# pre-create so every user can talk to the engine.
+		[ -p /run/dmx.in ] || mkfifo /run/dmx.in
+		[ -p /run/dmx.out ] || mkfifo /run/dmx.out
+		chmod 666 /run/dmx.in /run/dmx.out 2>/dev/null
+		easystick-respawn -- /usr/bin/dmxsend daemon >/run/dmxd.log 2>&1 &
+		echo $! > /run/.es-dmxd-sup
+		;;
+	stop|restart) ;;
+	*) echo "Usage: $0 {start|stop|restart}" >&2; exit 1 ;;
+esac
+exit 0

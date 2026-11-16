@@ -43,6 +43,7 @@ done
 chmod 0755 "${TARGET_DIR}/etc/init.d/S05easystick-tmpfs"
 chmod 0755 "${TARGET_DIR}/etc/init.d/S40network"
 chmod 0755 "${TARGET_DIR}/etc/init.d/S42grove"
+chmod 0755 "${TARGET_DIR}/etc/init.d/S43dmxd"
 chmod 0755 "${TARGET_DIR}/etc/init.d/S45bootsync"
 chmod 0755 "${TARGET_DIR}/etc/init.d/S85easystick-ssh"
 chmod 0755 "${TARGET_DIR}/etc/init.d/S90easystick-watchdog"
@@ -151,6 +152,13 @@ if [ -x "${FLTHDR}" ]; then
 	done
 	# Small helpers only need BusyBox's floor.
 	for bin in usr/sbin/easystick-respawn usr/sbin/easystick-mdns; do
+		if [ -f "${TARGET_DIR}/${bin}" ]; then
+			"${FLTHDR}" -s 16384 "${TARGET_DIR}/${bin}"
+		fi
+	done
+	# DMX512 sender: daemon mode keeps a 256-byte line buffer and a
+	# 513-byte universe on stack; 16 KB is the safe floor for NOMMU.
+	for bin in usr/bin/dmxsend; do
 		if [ -f "${TARGET_DIR}/${bin}" ]; then
 			"${FLTHDR}" -s 16384 "${TARGET_DIR}/${bin}"
 		fi
