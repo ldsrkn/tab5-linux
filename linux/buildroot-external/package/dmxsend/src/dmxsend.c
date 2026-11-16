@@ -2,31 +2,45 @@
 /*
  * dmxsend - DMX512 sender for the M5Stack Tab5 Grove port (Unit DMX).
  *
- * Streams a continuous DMX512 frame stream out of a serial port.  Each
- * frame: a BREAK made of one zero byte at 9600 baud (11 bit times =
- * 1.15 ms of low; DMX512-A allows 88 us..1 s), then the frame at
- * 250000 baud 8N2.  The gap between the break and the start code is
- * two speed-switch ioctls plus one write - well under a millisecond,
- * which the Unit DMX auto-direction transceiver needs (a shell's
- * ~100 ms exec gaps release the bus and mangle the start code).
+ * Sends a continuous DMX512 frame stream out of a serial port.  Each frame:
+ * a BREAK made of one zero byte at 9600 baud (11 bit times = 1.15 ms of
+ * low; DMX512-A allows 88 us..1 s), then the frame at 250000 baud 8N2.
+ * The gap between the break and the start code is the two speed-switch
+ * ioctls plus one write - well under a millisecond, which the Unit DMX
+ * auto-direction transceiver needs (a shell's ~100 ms exec gaps release
+ * the bus and mangle the start code).
  *
- * 250000 baud needs termios2/BOTHER: Linux has no B250000 constant,
- * and BusyBox stty cannot set it.  This program uses TCSETS2 only.
+ * 250000 baud needs termios2/BOTHER: Linux has no B250000 constant, and
+ * BusyBox stty cannot set it.  This program uses TCSETS2 only.
  *
- * Modes:
- *   dmxsend [-d dev] [-t s] [-r hz] <level | ch:val,...>
- *       one-shot mode: stream the given universe until -t seconds
- *       (0 = until killed), then one black frame and exit.
- *   dmxsend -F <fifo> [-d dev] [-r hz] [initial spec]
- *       daemon mode: create and open <fifo> (O_RDWR, so writers can
- *       come and go), stream the current universe at ~<hz> frames/s
- *       forever and apply line commands as they arrive:
- *         set <ch> <v>                 one channel (1-based)
- *         set <ch>:<v>[,<ch>:<v>...]   several channels per line
- *         fill <v> / zero             all channels
- *         snap <1024 hex chars>       whole universe (512 bytes)
- *         quit                        black frame and exit
+ * Two modes:
  *
+ * 1. one-shot (the original): stream one universe
+ *    dmxsend [-d device] [-t seconds] [-r hz] <level | ch:val,...>
+ *    On exit (or Ctrl-C, or -t timeout) one black frame is sent.
+ *
+ * 2. daemon (dmx): stream the universe and take live updates from a FIFO
+ *    dmxsend daemon [-d device] [-r hz]
+ *
+ *    Control FIFO: /run/dmx.in (created, 0666).  One command per line:
+ *      <ch>=<v>       jump channel ch (1..512) to v
+ *      <ch>~<v>       fade channel ch to v over the current fade time
+ *      all=<v>        jump every channel to v
+ *      all~<v>        fade every channel to v
+ *      fade <ms>      set the fade time for subsequent ~ commands
+ *      black          jump all to 0        black~ fades to 0
+ *      full           jump all to 255
+ *      dump           write the 512 current values to /run/dmx.out
+ *      quit           black frame, then exit
+ *    Unknown lines are ignored (forward compatibility).
+ *
+ *    Status FIFO: /run/dmx.out (created, 0666).  The daemon writes
+ *    "dmxd ready" on start and one line of 512 values per "dump":
+ *    "C <v1> <v2> ... <v512>".
+ *
+ * usage: dmxsend [-d device] [-t s] [-r hz] <spec>
+ *   spec: <level>                all 512 channels to <level> (0..255)
+ *         <ch>:<val>[,<ch>:<val>...] set channels (1-based), rest 0
  * Exit codes: 0 ok, 1 usage/open/ioctl error.
  */
 #include <errno.h>
@@ -36,16 +50,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
-#include <sys/select.h>
 #include <sys/stat.h>
-#include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
 /* termios2 lives in the kernel header; do not include <termios.h>. */
 #include <asm/termbits.h>
 
 #define FRAME_BYTES 513 /* start code + 512 slots */
-#define LINE_MAX    1200
+#define IN_FIFO "/run/dmx.in"
+#define OUT_FIFO "/run/dmx.out"
 
 static volatile sig_atomic_t running = 1;
 
@@ -101,177 +114,19 @@ static int send_frame(int fd, const unsigned char *frame)
 	return 0;
 }
 
-static int hexval(int c)
+static int open_port(const char *dev)
 {
-	if (c >= '0' && c <= '9')
-		return c - '0';
-	if (c >= 'a' && c <= 'f')
-		return c - 'a' + 10;
-	if (c >= 'A' && c <= 'F')
-		return c - 'A' + 10;
-	return -1;
-}
-
-/* Apply one command line to the universe.  Returns -1 on "quit". */
-static int apply_line(unsigned char *frame, char *line)
-{
-	if (!strncmp(line, "quit", 4))
-		return -1;
-	if (!strncmp(line, "set ", 4)) {
-		char *p = line + 4;
-
-		while (*p) {
-			long ch, val;
-
-			ch = strtol(p, &p, 10);
-			while (*p == ' ' || *p == ':' || *p == ',')
-				p++;
-			if (*p < '0' || *p > '9')
-				break;
-			val = strtol(p, &p, 10);
-			if (ch >= 1 && ch <= 512) {
-				if (val < 0)
-					val = 0;
-				if (val > 255)
-					val = 255;
-				frame[ch] = (unsigned char)val;
-			}
-			while (*p == ' ' || *p == ',')
-				p++;
-		}
-	} else if (!strncmp(line, "fill ", 5)) {
-		long val = strtol(line + 5, NULL, 10);
-		int i;
-
-		if (val < 0)
-			val = 0;
-		if (val > 255)
-			val = 255;
-		for (i = 1; i < FRAME_BYTES; i++)
-			frame[i] = (unsigned char)val;
-	} else if (!strncmp(line, "zero", 4)) {
-		memset(frame, 0, FRAME_BYTES);
-	} else if (!strncmp(line, "snap ", 5)) {
-		const char *p = line + 5;
-		int i;
-
-		for (i = 0; i < 512 && p[0] && p[1]; i++, p += 2) {
-			int hi = hexval(p[0]), lo = hexval(p[1]);
-
-			if (hi < 0 || lo < 0)
-				break;
-			frame[i] = (unsigned char)(hi * 16 + lo);
-		}
-	}
-	return 0;
-}
-
-/* Drain complete lines from buf[0..*len); apply each.  -1 on quit. */
-static int drain_lines(unsigned char *frame, char *buf, int *len)
-{
-	int start = 0;
-
-	while (running) {
-		int i;
-
-		for (i = start; i < *len; i++) {
-			if (buf[i] == '\n' || buf[i] == '\r')
-				break;
-		}
-		if (i >= *len)
-			break;
-		buf[i] = '\0';
-		if (apply_line(frame, buf + start) < 0)
-			return -1;
-		start = i + 1;
-	}
-	if (start) {
-		memmove(buf, buf + start, *len - start);
-		*len -= start;
-	}
-	return 0;
-}
-
-/* Parse the channel spec ("255" or "1:255,7:0") into frame[]. */
-static int parse_spec(char *spec, unsigned char *frame)
-{
-	memset(frame, 0, FRAME_BYTES);
-
-	if (strchr(spec, ':')) {
-		char *p = spec;
-
-		while (*p) {
-			long ch, val;
-
-			ch = strtol(p, &p, 10);
-			if (*p != ':')
-				return -1;
-			p++;
-			val = strtol(p, &p, 10);
-			if (ch < 1 || ch > 512 || val < 0 || val > 255)
-				return -1;
-			frame[ch] = (unsigned char)val;
-			if (*p == ',')
-				p++;
-		}
-		return 0;
-	} else {
-		long level = strtol(spec, NULL, 10);
-		int i;
-
-		if (level < 0 || level > 255)
-			return -1;
-		for (i = 1; i < FRAME_BYTES; i++)
-			frame[i] = (unsigned char)level;
-		return 0;
-	}
-}
-
-int main(int argc, char **argv)
-{
-	const char *dev = "/dev/ttyS3";
-	const char *fifo = NULL;
-	char *spec = NULL;
-	int seconds = 0, hz = 40;
-	unsigned char frame[FRAME_BYTES];
 	struct termios2 t;
-	int fd, c;
+	int fd = open(dev, O_RDWR | O_NOCTTY);
 
-	while ((c = getopt(argc, argv, "d:t:r:F:")) != -1) {
-		switch (c) {
-		case 'd':
-			dev = optarg;
-			break;
-		case 't':
-			seconds = atoi(optarg);
-			break;
-		case 'r':
-			hz = atoi(optarg);
-			break;
-		case 'F':
-			fifo = optarg;
-			break;
-		default:
-			goto usage;
-		}
-	}
-	if (optind < argc)
-		spec = argv[optind];
-	if (!spec && !fifo) {
-		fprintf(stderr, "dmxsend: nothing to send\n");
-		goto usage;
-	}
-
-	fd = open(dev, O_RDWR | O_NOCTTY);
 	if (fd < 0) {
 		perror(dev);
-		return 1;
+		return -1;
 	}
-
-	/* raw 8N2; speed set per frame via BOTHER */
 	if (ioctl(fd, TCGETS2, &t) < 0) {
 		perror("dmxsend: TCGETS2");
-		return 1;
+		close(fd);
+		return -1;
 	}
 	t.c_cflag &= ~(CSIZE | PARENB | PARODD | CRTSCTS);
 	t.c_cflag |= CS8 | CSTOPB | CREAD;
@@ -285,114 +140,371 @@ int main(int argc, char **argv)
 	t.c_ispeed = t.c_ospeed = 250000;
 	if (ioctl(fd, TCSETS2, &t) < 0) {
 		perror("dmxsend: TCSETS2");
-		return 1;
+		close(fd);
+		return -1;
 	}
+	return fd;
+}
 
-	signal(SIGINT, on_signal);
-	signal(SIGTERM, on_signal);
+/* ------------------------- one-shot mode ------------------------- */
 
-	if (spec && parse_spec(spec, frame) < 0) {
-		fprintf(stderr, "dmxsend: bad spec: %s\n", spec);
-		return 1;
+/* Parse "1:255,2:128,..." into frame (1-based channels).  0 on error. */
+static int parse_spec(const char *spec, unsigned char *frame)
+{
+	char *buf = strdup(spec), *tok, *end, *sep;
+	long ch, val;
+
+	if (!buf)
+		return 0;
+	for (tok = buf; (end = strchr(tok, ',')) != NULL; tok = end + 1) {
+		*end = '\0';
+		sep = strchr(tok, ':');
+		if (!sep)
+			goto bad;
+		*sep = '\0';
+		ch = strtol(tok, NULL, 10);
+		val = strtol(sep + 1, NULL, 10);
+		if (ch < 1 || ch > 512 || val < 0 || val > 255)
+			goto bad;
+		frame[ch] = (unsigned char)val;
 	}
-	if (!spec)
-		memset(frame, 0, sizeof frame);
+	sep = strchr(tok, ':');
+	if (!sep)
+		goto bad;
+	*sep = '\0';
+	ch = strtol(tok, NULL, 10);
+	val = strtol(sep + 1, NULL, 10);
+	if (ch < 1 || ch > 512 || val < 0 || val > 255)
+		goto bad;
+	frame[ch] = (unsigned char)val;
+	free(buf);
+	return 1;
+bad:
+	free(buf);
+	fprintf(stderr, "dmxsend: bad spec: %s\n", spec);
+	return 0;
+}
 
-	if (fifo) {
-		/* daemon mode: stream the universe, apply fifo commands */
-		char buf[LINE_MAX];
-		int len = 0, ff;
-		long period_us = 1000000L / (hz > 1 ? hz : 40);
+static int oneshot(const char *dev, int seconds, int hz,
+		   const char *spec)
+{
+	unsigned char frame[FRAME_BYTES];
+	unsigned long start;
+	int fd, i;
 
-		if (mkfifo(fifo, 0666) < 0 && errno != EEXIST) {
-			perror("dmxsend: mkfifo");
-			return 1;
-		}
-		/* O_RDWR: no EOF when writers come and go */
-		ff = open(fifo, O_RDWR);
-		if (ff < 0) {
-			perror(fifo);
-			return 1;
-		}
-		fprintf(stderr, "dmxsend: daemon on %s, fifo %s, %d Hz\n",
-			dev, fifo, hz);
-
-		while (running) {
-			struct timeval tv;
-			fd_set rfds;
-			long spent_us = 0;
-			int r;
-
-			if (send_frame(fd, frame) < 0)
-				return 1;
-			spent_us = 24200; /* break + frame time */
-
-			while (running &&
-			       spent_us < period_us) {
-				long left = period_us - spent_us;
-
-				FD_ZERO(&rfds);
-				FD_SET(ff, &rfds);
-				tv.tv_sec = left / 1000000L;
-				tv.tv_usec = left % 1000000L;
-				r = select(ff + 1, &rfds, NULL, NULL, &tv);
-				if (r < 0) {
-					if (errno == EINTR)
-						break;
-					perror("dmxsend: select");
-					return 1;
-				}
-				if (r == 0)
-					break; /* next frame due */
-				r = read(ff, buf + len, sizeof buf - len - 1);
-				if (r < 0) {
-					if (errno == EINTR)
-						break;
-					perror("dmxsend: read fifo");
-					return 1;
-				}
-				if (r == 0)
-					continue;
-				len += r;
-				buf[len] = '\0';
-				if (drain_lines(frame, buf, &len) < 0)
-					running = 0;
-				if ((unsigned)len >= sizeof buf - 1) {
-					/* overflow: drop the partial line */
-					len = 0;
-				}
-			}
-		}
-		close(ff);
-	} else {
-		unsigned long start;
-
-		fprintf(stderr, "dmxsend: %s, ch1=%d, %d Hz", dev, frame[1], hz);
-		if (seconds)
-			fprintf(stderr, ", %d s", seconds);
-		fprintf(stderr, "  (Ctrl-C = black frame + exit)\n");
-
-		start = (unsigned long)time(NULL);
-		while (running) {
-			if (send_frame(fd, frame) < 0)
-				return 1;
-			if (seconds &&
-			    (unsigned long)time(NULL) - start >= (unsigned long)seconds)
-				break;
-			usleep(1000000 / hz > 25000 ? (1000000 / hz - 25000)
-						    : 1000);
-		}
-	}
-
-	/* black frame on the way out so fixtures do not freeze at level */
 	memset(frame, 0, sizeof frame);
+	if (strchr(spec, ':')) {
+		if (!parse_spec(spec, frame))
+			return 1;
+	} else {
+		long level = strtol(spec, NULL, 10);
+
+		if (level < 0 || level > 255) {
+			fprintf(stderr, "dmxsend: level 0..255\n");
+			return 1;
+		}
+		for (i = 1; i < FRAME_BYTES; i++)
+			frame[i] = (unsigned char)level;
+	}
+
+	fd = open_port(dev);
+	if (fd < 0)
+		return 1;
+
+	fprintf(stderr, "dmxsend: %s, ch1=%d, %d Hz", dev, frame[1], hz);
+	if (seconds)
+		fprintf(stderr, ", %d s", seconds);
+	fprintf(stderr, "  (Ctrl-C = black frame + exit)\n");
+
+	start = (unsigned long)time(NULL);
+	while (running) {
+		if (send_frame(fd, frame) < 0)
+			return 1;
+		if (seconds && (unsigned long)time(NULL) - start >= (unsigned long)seconds)
+			break;
+		usleep(1000000 / hz > 25000 ? (1000000 / hz - 25000) : 1000);
+	}
+
+	memset(frame, 0, sizeof frame); /* leave the rig dark */
 	send_frame(fd, frame);
 	set_speed(fd, 9600);
 	close(fd);
 	return 0;
+}
 
+/* -------------------------- daemon mode -------------------------- */
+
+struct fade {
+	int from, to, step, frames_left;
+};
+
+struct universe {
+	unsigned char val[FRAME_BYTES]; /* [0] unused start code */
+	struct fade fade[FRAME_BYTES];
+	long fade_ms; /* default for ~ commands */
+};
+
+static void uv_set(struct universe *u, int ch, int v)
+{
+	u->val[ch] = (unsigned char)v;
+	u->fade[ch].frames_left = 0;
+}
+
+static void uv_fade_start(struct universe *u, int ch, int v, int period_us)
+{
+	struct fade *f = &u->fade[ch];
+
+	if (u->fade_ms <= 0 || (int)u->fade_ms <= period_us / 1000) {
+		uv_set(u, ch, v);
+		return;
+	}
+	f->from = u->val[ch];
+	f->to = v;
+	f->frames_left = (int)((u->fade_ms * 1000) / period_us);
+	f->step = (f->to - f->from) / f->frames_left;
+}
+
+static void uv_step(struct universe *u)
+{
+	int i;
+
+	for (i = 1; i < FRAME_BYTES; i++) {
+		struct fade *f = &u->fade[i];
+
+		if (f->frames_left <= 0)
+			continue;
+		if (f->frames_left == 1) {
+			u->val[i] = (unsigned char)f->to;
+			f->frames_left = 0;
+		} else {
+			f->from += f->step;
+			u->val[i] = (unsigned char)f->from;
+			f->frames_left--;
+		}
+	}
+}
+
+/* Apply one control line.  Returns 0 normally, -1 on "quit". */
+static int apply_line(struct universe *u, char *line, int period_us)
+{
+	char *p = line, *eq, *end;
+	long a, b;
+
+	while (*p == ' ')
+		p++;
+	if (!*p)
+		return 0;
+
+	if (!strcmp(p, "quit"))
+		return -1;
+	if (!strcmp(p, "black")) {
+		int i;
+
+		for (i = 1; i < FRAME_BYTES; i++)
+			uv_set(u, i, 0);
+		return 0;
+	}
+	if (!strcmp(p, "black~")) {
+		int i;
+
+		for (i = 1; i < FRAME_BYTES; i++)
+			uv_fade_start(u, i, 0, period_us);
+		return 0;
+	}
+	if (!strcmp(p, "full")) {
+		int i;
+
+		for (i = 1; i < FRAME_BYTES; i++)
+			uv_set(u, i, 255);
+		return 0;
+	}
+	if (!strncmp(p, "fade ", 5)) {
+		u->fade_ms = strtol(p + 5, NULL, 10);
+		return 0;
+	}
+	if (!strcmp(p, "dump"))
+		return 1; /* handled by the caller (needs the out fifo) */
+
+	/* <ch><op><v>  where op is = or ~ ;  or  all<op><v> */
+	if (!strncmp(p, "all", 3)) {
+		int i, fade = 0;
+
+		if (p[3] == '~')
+			fade = 1;
+		else if (p[3] != '=')
+			return 0;
+		b = strtol(p + 4, NULL, 10);
+		if (b < 0 || b > 255)
+			return 0;
+		for (i = 1; i < FRAME_BYTES; i++) {
+			if (fade)
+				uv_fade_start(u, i, (int)b, period_us);
+			else
+				uv_set(u, i, (int)b);
+		}
+		return 0;
+	}
+	eq = strpbrk(p, "=~");
+	if (!eq)
+		return 0; /* unknown: ignore */
+	a = strtol(p, &end, 10);
+	if (end != eq || a < 1 || a > 512)
+		return 0;
+	b = strtol(eq + 1, NULL, 10);
+	if (b < 0 || b > 255)
+		return 0;
+	if (*eq == '~')
+		uv_fade_start(u, (int)a, (int)b, period_us);
+	else
+		uv_set(u, (int)a, (int)b);
+	return 0;
+}
+
+static int daemon_mode(const char *dev, int hz)
+{
+	struct universe u;
+	int period_us = 1000000 / hz;
+	int in_fd = -1, out_fd, fd, i, r, got;
+	static char inbuf[8192], line[256];
+	static int fill = 0;
+	static int want_dump = 0;
+
+	memset(&u, 0, sizeof u);
+	u.fade_ms = 0;
+
+	if (mkfifo(IN_FIFO, 0666) < 0 && errno != EEXIST) {
+		perror("dmxsend: mkfifo " IN_FIFO);
+		return 1;
+	}
+	if (mkfifo(OUT_FIFO, 0666) < 0 && errno != EEXIST) {
+		perror("dmxsend: mkfifo " OUT_FIFO);
+		return 1;
+	}
+	/* O_RDWR on the in-fifo: no EOF spin when no writer is attached */
+	in_fd = open(IN_FIFO, O_RDWR | O_NONBLOCK);
+	if (in_fd < 0) {
+		perror("dmxsend: open " IN_FIFO);
+		return 1;
+	}
+	out_fd = open(OUT_FIFO, O_RDWR | O_NONBLOCK);
+	if (out_fd < 0) {
+		perror("dmxsend: open " OUT_FIFO);
+		close(in_fd);
+		return 1;
+	}
+
+	fd = open_port(dev);
+	if (fd < 0) {
+		close(in_fd);
+		close(out_fd);
+		return 1;
+	}
+
+	{
+		const char ready[] = "dmxd ready\n";
+
+		write(out_fd, ready, sizeof ready - 1);
+	}
+	fprintf(stderr, "dmxd: %s, %d Hz, fifo %s (Ctrl-C = black + exit)\n",
+		dev, hz, IN_FIFO);
+
+	signal(SIGINT, on_signal);
+	signal(SIGTERM, on_signal);
+
+	while (running) {
+		/* drain the control fifo */
+		while ((r = read(in_fd, inbuf, sizeof inbuf)) > 0) {
+			for (i = 0; i < r; i++) {
+				if (inbuf[i] == '\n') {
+					line[fill] = '\0';
+					{
+						int rc = apply_line(&u, line, period_us);
+
+						if (rc < 0)
+							running = 0;
+						else if (rc == 1)
+							want_dump = 1;
+					}
+					fill = 0;
+				} else if (fill < (int)sizeof line - 1) {
+					line[fill++] = inbuf[i];
+				}
+			}
+		}
+		if (want_dump) {
+			char out[4096];
+			int off = 0, ch;
+
+			want_dump = 0;
+			off += snprintf(out + off, sizeof out - off, "C");
+			for (ch = 1; ch < FRAME_BYTES; ch++)
+				off += snprintf(out + off, sizeof out - off,
+						" %d", u.val[ch]);
+			off += snprintf(out + off, sizeof out - off, "\n");
+			write(out_fd, out, off);
+		}
+
+		uv_step(&u);
+		if (send_frame(fd, u.val) < 0)
+			break;
+		usleep(period_us > 25000 ? period_us - 25000 : 1000);
+	}
+
+	/* leave the rig dark */
+	got = 1;
+	for (i = 1; i < FRAME_BYTES; i++)
+		got &= u.val[i] == 0;
+	if (!got) {
+		memset(u.val, 0, sizeof u.val);
+		send_frame(fd, u.val);
+	}
+	{
+		const char bye[] = "dmxd bye\n";
+
+		write(out_fd, bye, sizeof bye - 1);
+	}
+	set_speed(fd, 9600);
+	close(fd);
+	close(in_fd);
+	close(out_fd);
+	return 0;
+}
+
+int main(int argc, char **argv)
+{
+	const char *dev = "/dev/ttyS3";
+	int seconds = 0, hz = 40, c;
+	int daemon = 0;
+
+	while ((c = getopt(argc, argv, "d:t:r:")) != -1) {
+		switch (c) {
+		case 'd':
+			dev = optarg;
+			break;
+		case 't':
+			seconds = atoi(optarg);
+			break;
+		case 'r':
+			hz = atoi(optarg);
+			break;
+		default:
+			goto usage;
+		}
+	}
+	if (optind < argc && !strcmp(argv[optind], "daemon")) {
+		daemon = 1;
+		optind++;
+	}
+	if (optind >= argc && !daemon) {
 usage:
-	fprintf(stderr,
-		"usage: dmxsend [-d device] [-t s] [-r hz] [-F fifo] [<level | ch:val,...>]\n");
-	return 1;
+		fprintf(stderr,
+			"usage: dmxsend [-d device] [-t s] [-r hz] <level | ch:val,...>\n"
+			"       dmxsend [-d device] [-r hz] daemon   (live control via " IN_FIFO ")\n");
+		return 1;
+	}
+	signal(SIGINT, on_signal);
+	signal(SIGTERM, on_signal);
+	if (daemon)
+		return daemon_mode(dev, hz);
+	return oneshot(dev, seconds, hz, argv[optind]);
 }
