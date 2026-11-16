@@ -26,7 +26,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
           fetch-depth: 0
@@ -78,7 +78,7 @@ jobs:
           tar -czf "release/m5stamp-p4-c6-linux-smp-$VERSION-legal-info.tar.gz" \
             -C "$RUNNER_TEMP/out/buildroot" --exclude=legal-info/host-sources legal-info
           ls -l release/*-legal-info.tar.gz
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: release-assets
           path: release/*
@@ -88,7 +88,7 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - name: Fetch the validated build of this tag

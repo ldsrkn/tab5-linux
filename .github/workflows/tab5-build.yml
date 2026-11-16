@@ -36,7 +36,7 @@ jobs:
       VERSION: ${{ github.event.inputs.version || 'v0.0.1-tab5' }}
       ESP_HOSTED_MCU_REF: ${{ github.event.inputs.esp_hosted_mcu_ref || 'v2.13.0' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
           fetch-depth: 0
@@ -81,7 +81,7 @@ jobs:
           make -C "$k" ARCH=riscv mrproper >/dev/null
           tar -C "$(dirname "$k")" --zstd -cf "$RUNNER_TEMP/kit/linux-tree.tar.zst" "$(basename "$k")"
           ls -l "$RUNNER_TEMP/kit"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: tab5-kernel-kit
           path: ${{ runner.temp }}/kit/
@@ -117,7 +117,7 @@ jobs:
             '0xd000 ota_data_initial.bin' '0x10000 host_performs_slave_ota.bin' \
             '0x5f0000 network_adapter.bin' > tab5/ota-host/flash_args
           (cd tab5 && sha256sum c6/network_adapter.bin ota-host/*.bin > SHA256SUMS-c6.txt && cat SHA256SUMS-c6.txt)
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: tab5-assets
           path: tab5/
