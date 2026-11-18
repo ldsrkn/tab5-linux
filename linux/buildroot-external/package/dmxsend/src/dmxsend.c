@@ -20,9 +20,12 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
-#include <termios.h>
 #include <asm/termbits.h>
 #include <asm/ioctls.h>
+
+/* uClibc: tcdrain prototype lives in termios.h, but that header conflicts
+ * with asm/termbits.h (duplicate struct termios).  Declare it manually. */
+extern int tcdrain(int fd);
 #ifndef TCGETS2
 #define TCGETS2 0x802C542A
 #endif
