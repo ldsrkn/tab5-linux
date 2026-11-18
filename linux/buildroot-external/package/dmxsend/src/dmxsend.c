@@ -1,17 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * dmxsend v3 - DMX512 sender for the M5Stack Tab5 Grove port (Unit DMX).
+ * dmxsend v4 - DMX512 sender for M5Stack Tab5 Grove UART.
  *
- * Builds the DMX break at the final 250000 baud 8N2 rate instead of
- * switching to 9600 baud for a zero-byte break.  On 250k 8N2 one byte takes
- * 11 bit times = 44 us.  Four consecutive zero bytes give ~176 us of
- * line LOW, which matches the DMX512-A break length (DMX_BREAK_LEN_US).
- * A short mark-after-break follows, then the 513-byte frame.
+ * Strict DMX512-A frame:
+ *   - 250000 baud, 8N2
+ *   - BREAK: six 0x00 bytes = ~264 us LOW (within 88 us .. 1 s)
+ *   - MAB: one 0xFF byte = ~44 us HIGH (min 12 us)
+ *   - Frame: 0x00 start code + 512 slots
  *
- * The Unit DMX uses a CA-IS3092W auto-direction transceiver.  A 1.15 ms
- * break created by sending one byte at 9600 baud kept the line low for
- * too long and apparently caused the transceiver to drop out of TX mode.
- * This version keeps the whole frame at 250k and does not switch speeds.
+ * The whole frame stays at 250k; no baud-rate switching.
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -23,6 +20,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#include <termios.h>
 #include <asm/termbits.h>
 #include <asm/ioctls.h>
 #ifndef TCGETS2
@@ -33,6 +31,7 @@
 #endif
 
 #define FRAME_BYTES 513 /* start code + 512 slots */
+#define HZ 40
 
 static volatile sig_atomic_t running = 1;
 
@@ -74,19 +73,37 @@ static int open_port(const char *dev)
 	return fd;
 }
 
-/* Send one DMX frame.  Break is four 0x00 bytes at 250k 8N2. */
+static int flush_frame(int fd)
+{
+	if (tcdrain(fd) < 0) {
+		perror("dmxsend: tcdrain");
+		return -1;
+	}
+	return 0;
+}
+
+/* Send one DMX frame. */
 static int send_frame(int fd, const unsigned char *frame)
 {
-	unsigned char brk[4] = {0, 0, 0, 0};
+	unsigned char brk[6] = {0, 0, 0, 0, 0, 0};
+	unsigned char mab[1] = {0xFF};
 	ssize_t n;
 
+	/* BREAK: keep line LOW for ~264 us */
 	n = write(fd, brk, sizeof brk);
 	if (n != (ssize_t)sizeof brk) {
 		perror("dmxsend: break");
 		return -1;
 	}
-	usleep(20); /* MAB: keep it short */
 
+	/* MAB: one stop-bit-time at 250k 8N2 = 44 us HIGH */
+	n = write(fd, mab, sizeof mab);
+	if (n != (ssize_t)sizeof mab) {
+		perror("dmxsend: mab");
+		return -1;
+	}
+
+	/* Frame */
 	n = write(fd, frame, FRAME_BYTES);
 	if (n < 0) {
 		perror("dmxsend: frame");
@@ -96,7 +113,9 @@ static int send_frame(int fd, const unsigned char *frame)
 		fprintf(stderr, "dmxsend: short frame write (%ld)\n", (long)n);
 		return -1;
 	}
-	usleep(23000); /* 513 bytes * 44 us = 22.6 ms on the wire */
+
+	if (flush_frame(fd) < 0)
+		return -1;
 	return 0;
 }
 
@@ -137,18 +156,18 @@ bad:
 }
 
 static int oneshot(const char *dev, int seconds, int hz,
-		   const char *spec)
+		   const unsigned char *spec)
 {
 	unsigned char frame[FRAME_BYTES];
-	unsigned long start;
+	unsigned long start, frame_us, period_us, sleep_us;
 	int fd, i;
 
 	memset(frame, 0, sizeof frame);
-	if (strchr(spec, ':')) {
-		if (!parse_spec(spec, frame))
+	if (strchr((const char *)spec, ':')) {
+		if (!parse_spec((const char *)spec, frame))
 			return 1;
 	} else {
-		long level = strtol(spec, NULL, 10);
+		long level = strtol((const char *)spec, NULL, 10);
 
 		if (level < 0 || level > 255) {
 			fprintf(stderr, "dmxsend: level 0..255\n");
@@ -162,7 +181,15 @@ static int oneshot(const char *dev, int seconds, int hz,
 	if (fd < 0)
 		return 1;
 
-	fprintf(stderr, "dmxsend v3: %s, ch1=%d, %d Hz", dev, frame[1], hz);
+	/* One frame on the wire:
+	 * break 6 bytes + mab 1 byte + frame 513 bytes = 520 bytes * 44 us = 22880 us
+	 * plus inter-frame gap to reach the desired Hz.
+	 */
+	frame_us = (6 + 1 + FRAME_BYTES) * 44;
+	period_us = 1000000 / hz;
+	sleep_us = (period_us > frame_us) ? (period_us - frame_us) : 1000;
+
+	fprintf(stderr, "dmxsend v4: %s, ch1=%d, %d Hz", dev, frame[1], hz);
 	if (seconds)
 		fprintf(stderr, ", %d s", seconds);
 	fprintf(stderr, "  (Ctrl-C = black frame + exit)\n");
@@ -171,13 +198,14 @@ static int oneshot(const char *dev, int seconds, int hz,
 	while (running) {
 		if (send_frame(fd, frame) < 0)
 			return 1;
+		usleep(sleep_us);
 		if (seconds && (unsigned long)time(NULL) - start >= (unsigned long)seconds)
 			break;
-		usleep(1000000 / hz > 25000 ? (1000000 / hz - 25000) : 1000);
 	}
 
 	memset(frame, 0, sizeof frame);
 	send_frame(fd, frame);
+	flush_frame(fd);
 	close(fd);
 	return 0;
 }
@@ -185,7 +213,7 @@ static int oneshot(const char *dev, int seconds, int hz,
 int main(int argc, char **argv)
 {
 	const char *dev = "/dev/ttyS3";
-	int seconds = 0, hz = 40, c;
+	int seconds = 0, hz = HZ, c;
 
 	while ((c = getopt(argc, argv, "d:t:r:")) != -1) {
 		switch (c) {
@@ -210,5 +238,6 @@ usage:
 	}
 	signal(SIGINT, on_signal);
 	signal(SIGTERM, on_signal);
-	return oneshot(dev, seconds, hz, argv[optind]);
+	return oneshot(dev, seconds, hz,
+		       (const unsigned char *)argv[optind]);
 }
